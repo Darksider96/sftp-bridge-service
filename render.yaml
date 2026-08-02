@@ -3,7 +3,6 @@ services:
     name: sftp-bridge-service
     runtime: node
     plan: free
-    rootDir: sftp-bridge-service
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
@@ -20,3 +19,9 @@ services:
         sync: false
       - key: SFTP_REMOTE_DIR
         value: /flag-contato/Envio
+      - key: SFTP_RETORNO_DIR
+        value: /flag-contato/Retorno
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

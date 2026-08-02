@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { withSftpConnection, getSftpConfig } = require('./sftpClient');
+const { triggerCheckRetorno } = require('./checkRetorno');
 
 const app = express();
 
@@ -48,6 +49,20 @@ app.post('/upload', express.raw({ type: '*/*', limit: '25mb' }), async (req, res
     console.error('Erro no upload SFTP:', error);
     res.status(502).json({ success: false, error: error.message });
   }
+});
+
+app.post('/check-retorno', (req, res) => {
+  const auth = req.get('authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (token !== BRIDGE_TOKEN) {
+    return res.status(401).json({ success: false, error: 'Token inválido' });
+  }
+
+  // Responde imediatamente (fire-and-forget) — o processamento em si pode levar
+  // mais do que o timeout do net.http_post do pg_cron, especialmente após um
+  // cold-start do plano free do Render.
+  res.status(202).json({ success: true, message: 'Verificação da pasta Retorno iniciada' });
+  triggerCheckRetorno();
 });
 
 app.listen(PORT, () => {
