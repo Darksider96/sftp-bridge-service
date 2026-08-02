@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: sftp-bridge-service
+    runtime: node
+    rootDir: sftp-bridge-service
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: BRIDGE_TOKEN
+        sync: false
+      - key: SFTP_HOST
+        sync: false
+      - key: SFTP_PORT
+        value: "22"
+      - key: SFTP_USER
+        sync: false
+      - key: SFTP_PASS
+        sync: false
+      - key: SFTP_REMOTE_DIR
+        value: /flag-contato/Envio

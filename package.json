@@ -1,0 +1,16 @@
+{
+  "name": "sftp-bridge-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ssh2-sftp-client": "^10.0.3"
+  }
+}
