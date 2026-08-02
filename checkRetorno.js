@@ -64,66 +64,83 @@ async function processReturnedFile(fileName) {
     return;
   }
 
-  const returnedBuffer = await download(remotePath);
-  const returnedCsv = returnedBuffer.toString('utf-8');
+  try {
+    const returnedBuffer = await download(remotePath);
+    const returnedCsv = returnedBuffer.toString('utf-8');
 
-  const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
-  const { error: rawUploadError } = await supabaseAdmin.storage
-    .from(BUCKET)
-    .upload(rawUploadPath, returnedBuffer, { contentType: 'text/csv' });
-  if (rawUploadError) throw new Error(`Falha ao subir arquivo bruto de retorno: ${rawUploadError.message}`);
+    const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
+    const { error: rawUploadError } = await supabaseAdmin.storage
+      .from(BUCKET)
+      .upload(rawUploadPath, returnedBuffer, { contentType: 'text/csv' });
+    if (rawUploadError) throw new Error(`Falha ao subir arquivo bruto de retorno: ${rawUploadError.message}`);
 
-  await supabaseAdmin
-    .from('centrifuga_jobs')
-    .update({ arquivo_retornado_url: rawUploadPath, status: 'concluido' })
-    .eq('ticket_id', ticket.id);
+    await supabaseAdmin
+      .from('centrifuga_jobs')
+      .update({ arquivo_retornado_url: rawUploadPath })
+      .eq('ticket_id', ticket.id);
 
-  const { data: originalBlob, error: originalError } = await supabaseAdmin.storage
-    .from(BUCKET)
-    .download(ticket.original_file_url);
-  if (originalError || !originalBlob) {
-    throw new Error(`Falha ao baixar arquivo original: ${originalError?.message || 'sem dados'}`);
+    const { data: originalBlob, error: originalError } = await supabaseAdmin.storage
+      .from(BUCKET)
+      .download(ticket.original_file_url);
+    if (originalError || !originalBlob) {
+      throw new Error(`Falha ao baixar arquivo original: ${originalError?.message || 'sem dados'}`);
+    }
+    const originalCsv = Buffer.from(await originalBlob.arrayBuffer()).toString('utf-8');
+
+    const originalRows = Papa.parse(originalCsv, { header: true, skipEmptyLines: true }).data;
+    const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
+
+    const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
+    const finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
+    const finalCsv = Papa.unparse(finalRows);
+
+    const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticket.id}.csv`;
+    const { error: processedUploadError } = await supabaseAdmin.storage
+      .from(BUCKET)
+      .upload(processedUploadPath, Buffer.from(finalCsv, 'utf-8'), { contentType: 'text/csv' });
+    if (processedUploadError) throw new Error(`Falha ao subir arquivo processado: ${processedUploadError.message}`);
+
+    // Mesma semântica de "primeiro status com este type" usada em getDefaultStatus() no frontend
+    // (src/lib/supabase-data.ts) — pode haver mais de uma linha com type='higienizado'.
+    const { data: higienizadoStatus, error: statusError } = await supabaseAdmin
+      .from('ticket_statuses')
+      .select('id')
+      .eq('type', 'higienizado')
+      .order('display_order', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (statusError || !higienizadoStatus) {
+      throw new Error(`Status 'higienizado' não encontrado: ${statusError?.message || 'nenhuma linha'}`);
+    }
+
+    const { error: ticketUpdateError } = await supabaseAdmin
+      .from('tickets')
+      .update({
+        processed_file_url: processedUploadPath,
+        processed_file_name: ticket.original_file_name,
+        status_id: higienizadoStatus.id,
+      })
+      .eq('id', ticket.id);
+    if (ticketUpdateError) throw new Error(`Falha ao atualizar ticket: ${ticketUpdateError.message}`);
+
+    await supabaseAdmin
+      .from('centrifuga_jobs')
+      .update({ status: 'concluido' })
+      .eq('ticket_id', ticket.id);
+
+    await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Processados`);
+    console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${finalRows.length} registros aprovados)`);
+  } catch (err) {
+    try {
+      await supabaseAdmin
+        .from('centrifuga_jobs')
+        .update({ status: 'falha', erro_mensagem: err.message })
+        .eq('ticket_id', ticket.id);
+    } catch (updateErr) {
+      console.error(`check-retorno: falha ao gravar status de falha do ticket ${ticket.id}:`, updateErr.message);
+    }
+    throw err;
   }
-  const originalCsv = Buffer.from(await originalBlob.arrayBuffer()).toString('utf-8');
-
-  const originalRows = Papa.parse(originalCsv, { header: true, skipEmptyLines: true }).data;
-  const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
-
-  const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
-  const finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
-  const finalCsv = Papa.unparse(finalRows);
-
-  const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticket.id}.csv`;
-  const { error: processedUploadError } = await supabaseAdmin.storage
-    .from(BUCKET)
-    .upload(processedUploadPath, Buffer.from(finalCsv, 'utf-8'), { contentType: 'text/csv' });
-  if (processedUploadError) throw new Error(`Falha ao subir arquivo processado: ${processedUploadError.message}`);
-
-  // Mesma semântica de "primeiro status com este type" usada em getDefaultStatus() no frontend
-  // (src/lib/supabase-data.ts) — pode haver mais de uma linha com type='higienizado'.
-  const { data: higienizadoStatus, error: statusError } = await supabaseAdmin
-    .from('ticket_statuses')
-    .select('id')
-    .eq('type', 'higienizado')
-    .order('display_order', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (statusError || !higienizadoStatus) {
-    throw new Error(`Status 'higienizado' não encontrado: ${statusError?.message || 'nenhuma linha'}`);
-  }
-
-  const { error: ticketUpdateError } = await supabaseAdmin
-    .from('tickets')
-    .update({
-      processed_file_url: processedUploadPath,
-      processed_file_name: ticket.original_file_name,
-      status_id: higienizadoStatus.id,
-    })
-    .eq('id', ticket.id);
-  if (ticketUpdateError) throw new Error(`Falha ao atualizar ticket: ${ticketUpdateError.message}`);
-
-  await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Processados`);
-  console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${finalRows.length} registros aprovados)`);
 }
 
 /**
