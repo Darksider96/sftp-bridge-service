@@ -2,6 +2,7 @@ services:
   - type: web
     name: sftp-bridge-service
     runtime: node
+    plan: free
     rootDir: sftp-bridge-service
     buildCommand: npm install
     startCommand: npm start
