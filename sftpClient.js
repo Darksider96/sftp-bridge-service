@@ -37,15 +37,9 @@ async function download(remotePath) {
   return withSftpConnection((sftp) => sftp.get(remotePath));
 }
 
-/** Move um arquivo remoto para outro diretório, criando-o se necessário. */
-async function moveTo(fromPath, toDir) {
-  return withSftpConnection(async (sftp) => {
-    await sftp.mkdir(toDir, true);
-    const fileName = fromPath.split('/').pop();
-    const toPath = `${toDir}/${fileName}`;
-    await sftp.rename(fromPath, toPath);
-    return toPath;
-  });
+/** Remove um arquivo remoto. */
+async function remove(remotePath) {
+  return withSftpConnection((sftp) => sftp.delete(remotePath));
 }
 
-module.exports = { getSftpConfig, withSftpConnection, listDir, download, moveTo };
+module.exports = { getSftpConfig, withSftpConnection, listDir, download, remove };

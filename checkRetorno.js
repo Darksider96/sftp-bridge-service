@@ -3,7 +3,7 @@ const { extractTicketId } = require('./ticketIdMatcher');
 const { matchTicketByFileName } = require('./fileNameMatcher');
 const { processCentrifugeReturn } = require('./csvProcessor');
 const { supabaseAdmin } = require('./supabaseAdmin');
-const { listDir, download, moveTo } = require('./sftpClient');
+const { listDir, download, remove } = require('./sftpClient');
 
 const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, processed_file_url';
 
@@ -35,7 +35,8 @@ async function checkRetorno() {
     return;
   }
 
-  // Só arquivos no nível raiz — ignora subpastas (Processados/Orfaos/Duplicados)
+  // Só arquivos no nível raiz — ignora quaisquer subpastas (incl. pastas legado
+  // que já existam na SFTP). Este serviço nunca cria pastas dentro de Retorno.
   const candidateFiles = files.filter((f) => f.type === '-');
 
   for (const file of candidateFiles) {
@@ -53,14 +54,15 @@ async function processReturnedFile(fileName) {
   const ticket = await resolveTicket(fileName);
 
   if (!ticket) {
-    console.log(`check-retorno: "${fileName}" não corresponde a nenhum ticket — órfão`);
-    await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Orfaos`);
+    // Não move nem apaga — arquivo fica na raiz de Retorno para revisão manual.
+    // Será relogado a cada tick até alguém resolver manualmente.
+    console.log(`check-retorno: "${fileName}" não corresponde a nenhum ticket — órfão, mantido em Retorno`);
     return;
   }
 
   if (ticket.processed_file_url) {
-    console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado`);
-    await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Duplicados`);
+    // Idem: fica em Retorno, sem mover/apagar, para revisão manual.
+    console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado, mantido em Retorno`);
     return;
   }
 
@@ -128,7 +130,7 @@ async function processReturnedFile(fileName) {
       .update({ status: 'concluido' })
       .eq('ticket_id', ticket.id);
 
-    await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Processados`);
+    await remove(remotePath);
     console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${finalRows.length} registros aprovados)`);
   } catch (err) {
     try {
