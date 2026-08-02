@@ -1,15 +1,11 @@
 const express = require('express');
 const path = require('path');
-const Client = require('ssh2-sftp-client');
+const { withSftpConnection, getSftpConfig } = require('./sftpClient');
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN;
-const SFTP_HOST = process.env.SFTP_HOST;
-const SFTP_PORT = parseInt(process.env.SFTP_PORT || '22', 10);
-const SFTP_USER = process.env.SFTP_USER;
-const SFTP_PASS = process.env.SFTP_PASS;
 const SFTP_REMOTE_DIR = process.env.SFTP_REMOTE_DIR || '/flag-contato/Envio';
 
 if (!BRIDGE_TOKEN) {
@@ -39,27 +35,18 @@ app.post('/upload', express.raw({ type: '*/*', limit: '25mb' }), async (req, res
     return res.status(400).json({ success: false, error: 'Corpo da requisição vazio' });
   }
 
-  if (!SFTP_HOST || !SFTP_USER || !SFTP_PASS) {
+  if (!getSftpConfig()) {
     return res.status(500).json({ success: false, error: 'Secrets do SFTP ausentes no serviço (SFTP_HOST/SFTP_USER/SFTP_PASS)' });
   }
 
-  const sftp = new Client();
   const remotePath = `${SFTP_REMOTE_DIR}/${fileName}`;
 
   try {
-    await sftp.connect({
-      host: SFTP_HOST,
-      port: SFTP_PORT,
-      username: SFTP_USER,
-      password: SFTP_PASS,
-    });
-    await sftp.put(req.body, remotePath);
+    await withSftpConnection((sftp) => sftp.put(req.body, remotePath));
     res.json({ success: true, remotePath });
   } catch (error) {
     console.error('Erro no upload SFTP:', error);
     res.status(502).json({ success: false, error: error.message });
-  } finally {
-    await sftp.end().catch(() => {});
   }
 });
 
