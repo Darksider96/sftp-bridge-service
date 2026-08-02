@@ -1,8 +1,11 @@
 const Papa = require('papaparse');
 const { extractTicketId } = require('./ticketIdMatcher');
+const { matchTicketByFileName } = require('./fileNameMatcher');
 const { processCentrifugeReturn } = require('./csvProcessor');
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, moveTo } = require('./sftpClient');
+
+const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, processed_file_url';
 
 const SFTP_RETORNO_DIR = process.env.SFTP_RETORNO_DIR || '/flag-contato/Retorno';
 const BUCKET = 'mailing-files';
@@ -47,30 +50,16 @@ async function checkRetorno() {
 
 async function processReturnedFile(fileName) {
   const remotePath = `${SFTP_RETORNO_DIR}/${fileName}`;
-  const ticketId = extractTicketId(fileName);
-
-  if (!ticketId) {
-    console.log(`check-retorno: "${fileName}" sem ticket_id reconhecível no nome — órfão`);
-    await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Orfaos`);
-    return;
-  }
-
-  const { data: ticket, error: ticketError } = await supabaseAdmin
-    .from('tickets')
-    .select('id, client_id, aggressiveness, original_file_url, original_file_name, processed_file_url')
-    .eq('id', ticketId)
-    .maybeSingle();
-
-  if (ticketError) throw new Error(`Erro ao buscar ticket ${ticketId}: ${ticketError.message}`);
+  const ticket = await resolveTicket(fileName);
 
   if (!ticket) {
-    console.log(`check-retorno: "${fileName}" referencia ticket ${ticketId}, que não existe — órfão`);
+    console.log(`check-retorno: "${fileName}" não corresponde a nenhum ticket — órfão`);
     await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Orfaos`);
     return;
   }
 
   if (ticket.processed_file_url) {
-    console.log(`check-retorno: ticket ${ticketId} já tem processed_file_url — retorno duplicado`);
+    console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado`);
     await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Duplicados`);
     return;
   }
@@ -78,7 +67,7 @@ async function processReturnedFile(fileName) {
   const returnedBuffer = await download(remotePath);
   const returnedCsv = returnedBuffer.toString('utf-8');
 
-  const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticketId}.csv`;
+  const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
   const { error: rawUploadError } = await supabaseAdmin.storage
     .from(BUCKET)
     .upload(rawUploadPath, returnedBuffer, { contentType: 'text/csv' });
@@ -87,7 +76,7 @@ async function processReturnedFile(fileName) {
   await supabaseAdmin
     .from('centrifuga_jobs')
     .update({ arquivo_retornado_url: rawUploadPath, status: 'concluido' })
-    .eq('ticket_id', ticketId);
+    .eq('ticket_id', ticket.id);
 
   const { data: originalBlob, error: originalError } = await supabaseAdmin.storage
     .from(BUCKET)
@@ -104,7 +93,7 @@ async function processReturnedFile(fileName) {
   const finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
   const finalCsv = Papa.unparse(finalRows);
 
-  const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticketId}.csv`;
+  const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticket.id}.csv`;
   const { error: processedUploadError } = await supabaseAdmin.storage
     .from(BUCKET)
     .upload(processedUploadPath, Buffer.from(finalCsv, 'utf-8'), { contentType: 'text/csv' });
@@ -130,11 +119,44 @@ async function processReturnedFile(fileName) {
       processed_file_name: ticket.original_file_name,
       status_id: higienizadoStatus.id,
     })
-    .eq('id', ticketId);
+    .eq('id', ticket.id);
   if (ticketUpdateError) throw new Error(`Falha ao atualizar ticket: ${ticketUpdateError.message}`);
 
   await moveTo(remotePath, `${SFTP_RETORNO_DIR}/Processados`);
-  console.log(`check-retorno: ticket ${ticketId} higienizado com sucesso (${finalRows.length} registros aprovados)`);
+  console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${finalRows.length} registros aprovados)`);
+}
+
+/**
+ * Resolve o ticket dono de um arquivo retornado.
+ *
+ * 1. Tenta o ticket_id embutido no nome (caminho rápido, caso sobreviva ao
+ *    processo da higienizadora — hoje não sobrevive na prática, mas é de graça
+ *    manter como caminho preferencial). Se houver um id no nome mas ele não
+ *    corresponder a nenhum ticket, é órfão — não cai no fallback abaixo.
+ * 2. Sem ticket_id no nome (caso comum): casa pelo `original_file_name` entre
+ *    os tickets pendentes (sem processed_file_url), pegando o mais antigo em
+ *    caso de empate — ver fileNameMatcher.js.
+ */
+async function resolveTicket(fileName) {
+  const embeddedId = extractTicketId(fileName);
+  if (embeddedId) {
+    const { data: ticket, error } = await supabaseAdmin
+      .from('tickets')
+      .select(TICKET_COLUMNS)
+      .eq('id', embeddedId)
+      .maybeSingle();
+    if (error) throw new Error(`Erro ao buscar ticket ${embeddedId}: ${error.message}`);
+    return ticket;
+  }
+
+  const { data: pendingTickets, error: pendingError } = await supabaseAdmin
+    .from('tickets')
+    .select(TICKET_COLUMNS)
+    .is('processed_file_url', null)
+    .order('created_at', { ascending: true });
+  if (pendingError) throw new Error(`Erro ao buscar tickets pendentes: ${pendingError.message}`);
+
+  return matchTicketByFileName(fileName, pendingTickets || []);
 }
 
 module.exports = { triggerCheckRetorno };
