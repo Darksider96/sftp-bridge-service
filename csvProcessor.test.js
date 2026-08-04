@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { processCentrifugeReturn } = require('./csvProcessor');
+const { parseMailingCsv } = require('./mailingNormalizer');
 
 function original(rows) {
   return rows.map(([ddd, telefone, nome]) => ({ DDD: ddd, Telefone: telefone, Nome: nome }));
@@ -63,4 +64,30 @@ test('originalData vazio retorna []', () => {
 test('returnedData vazio retorna []', () => {
   const orig = original([['11', '900000001', 'Cliente']]);
   assert.deepEqual(processCentrifugeReturn(orig, [], 'AGRESSIVA'), []);
+});
+
+test('arquivo original sem cabeçalho (layout "finaz"): PROCV ainda casa os telefones', () => {
+  // Antes da correção, originalData vinha de um Papa.parse cru com header:true — a primeira
+  // linha virava cabeçalho por engano e o pareamento de colunas não achava nenhum telefone,
+  // então TODO cliente era descartado do resultado final, mesmo com score aprovado.
+  const originalCsv = [
+    '30000000001;FULANO DA SILVA;41912340001;',
+    '30000000002;CICLANA SOUZA;11974950002;11956740003',
+  ].join('\n');
+  const originalRows = parseMailingCsv(originalCsv);
+  assert.equal(originalRows.length, 2); // a primeira linha não pode ter sumido
+
+  const returnedRows = returned([
+    ['41', '912340001', 5], // aprovado
+    ['11', '974950002', 1], // reprovado (score baixo)
+    ['11', '956740003', 5], // aprovado
+  ]);
+
+  const result = processCentrifugeReturn(originalRows, returnedRows, 'AGRESSIVA');
+
+  // O cliente 1 tem seu único telefone aprovado -> entra.
+  // O cliente 2 tem um telefone reprovado e outro aprovado -> entra (basta um bom).
+  assert.equal(result.length, 2);
+  assert.equal(result[0].id, '30000000001');
+  assert.equal(result[1].id, '30000000002');
 });

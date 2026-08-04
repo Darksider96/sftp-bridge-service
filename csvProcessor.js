@@ -1,9 +1,13 @@
 // Porta CommonJS de src/lib/centrifuge/csvProcessor.ts (processCentrifugeReturn).
 // Mesma lógica — mantenha as duas versões em sincronia se uma mudar.
 
+const { detectPhonePairs, extractDddTelefone } = require('./mailingNormalizer');
+
 /**
  * Motor de Retorno (PROCV Automático)
- * @param {Record<string,string>[]} originalData Dados da planilha bruta do cliente
+ * @param {Record<string,string>[]} originalData Dados da planilha bruta do cliente — já deve ter
+ *   passado por parseMailingCsv() (não Papa.parse cru), senão arquivos sem cabeçalho (ex: "finaz")
+ *   perdem a primeira linha e o pareamento de colunas abaixo não acha nenhum telefone.
  * @param {Record<string,string>[]} returnedData Dados devolvidos pela higienizadora (com coluna Score)
  * @param {'AGRESSIVA'|'MODERADA'} filterLevel Agressiva (corta 0,1,2) ou Moderada (corta 0,1)
  * @returns {Record<string,string>[]}
@@ -19,7 +23,9 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
   // 2. Criar a "Lista VIP" de telefones aprovados
   const validPhones = new Set();
 
-  // Busca nomes de colunas na planilha retornada (case insensitive)
+  // Busca nomes de colunas na planilha retornada (case insensitive). O arquivo
+  // retornado é sempre o nosso próprio formato (CPF;DDD;Telefone + Score
+  // anexado pela higienizadora), então não precisa do motor de detecção.
   const retHeaders = Object.keys(returnedData[0]);
   const scoreCol = retHeaders.find(h => h.toLowerCase().includes('score')) || 'Score';
   const retDddCol = retHeaders.find(h => h.toLowerCase() === 'ddd') || 'DDD';
@@ -40,15 +46,16 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
     }
   }
 
-  // 3. Preparar a leitura das colunas de telefone da planilha original
+  // 3. Preparar a leitura das colunas de telefone da planilha original, com o
+  // mesmo motor usado no envio (mailingNormalizer): pareia por sufixo
+  // numérico, aceita DDD chumbado no telefone e funciona mesmo com as colunas
+  // sintéticas que parseMailingCsv gera pra arquivo sem cabeçalho. Não precisa
+  // detectar a coluna de id aqui (só quais colunas são ddd/telefone), então
+  // passa uma string vazia — nenhum header real deve casar com isso — em vez
+  // de detectIdColumn, senão ele podia "roubar" a própria coluna DDD como se
+  // fosse o id e excluí-la do pareamento.
   const origHeaders = Object.keys(originalData[0]);
-  const dddCols = origHeaders.filter(h => h.toLowerCase().includes('ddd'));
-  const telCols = origHeaders.filter(h => h.toLowerCase().includes('tel') || h.toLowerCase().includes('celular'));
-
-  const pairs = [];
-  telCols.forEach((telCol, index) => {
-    pairs.push({ ddd: dddCols[index], tel: telCol });
-  });
+  const pairs = detectPhonePairs(origHeaders, '');
 
   // 4. O PROCV: Filtrar a base original
   const finalResult = [];
@@ -60,9 +67,8 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
     for (const pair of pairs) {
       const rawPhone = row[pair.tel] || '';
       const rawDdd = pair.ddd ? (row[pair.ddd] || '') : '';
-      const fullNumber = `${rawDdd}${rawPhone}`.replace(/\D/g, '');
-
-      if (validPhones.has(fullNumber)) {
+      const extracted = extractDddTelefone(rawDdd, rawPhone);
+      if (extracted && validPhones.has(`${extracted.ddd}${extracted.telefone}`)) {
         hasValidPhone = true;
         break; // Achou um telefone bom, já pode salvar o cliente e ir pro próximo
       }

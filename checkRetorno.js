@@ -2,6 +2,7 @@ const Papa = require('papaparse');
 const { extractTicketId } = require('./ticketIdMatcher');
 const { matchTicketByFileName } = require('./fileNameMatcher');
 const { processCentrifugeReturn } = require('./csvProcessor');
+const { parseMailingCsv } = require('./mailingNormalizer');
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
 
@@ -89,7 +90,10 @@ async function processReturnedFile(fileName) {
     }
     const originalCsv = Buffer.from(await originalBlob.arrayBuffer()).toString('utf-8');
 
-    const originalRows = Papa.parse(originalCsv, { header: true, skipEmptyLines: true }).data;
+    // parseMailingCsv (não Papa.parse cru) porque o arquivo original do cliente pode não ter
+    // cabeçalho (ex: layout "finaz") — sem essa detecção a primeira linha vira cabeçalho por
+    // engano e o PROCV abaixo não acha nenhuma coluna de telefone pra casar.
+    const originalRows = parseMailingCsv(originalCsv);
     const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
 
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
