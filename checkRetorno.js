@@ -98,7 +98,10 @@ async function processReturnedFile(fileName) {
 
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
     const finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
-    const finalCsv = Papa.unparse(finalRows);
+    // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
+    // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
+    // então o arquivo final precisa manter o mesmo delimitador.
+    const finalCsv = Papa.unparse(finalRows, { delimiter: ';' });
 
     const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticket.id}.csv`;
     const { error: processedUploadError } = await supabaseAdmin.storage
