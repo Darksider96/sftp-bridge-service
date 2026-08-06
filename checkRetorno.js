@@ -13,6 +13,20 @@ const BUCKET = 'mailing-files';
 
 let isChecking = false;
 
+// O discador (Argus/Dazsoft) só reconhece/casa o cliente do lado deles se o
+// CODIGO vier em minúsculo. O arquivo original do cliente às vezes chega com
+// essa coluna em maiúsculo, então normaliza no arquivo final (pós-PROCV)
+// antes de disponibilizar pra envio — sem isso o discador não reconhece o
+// registro mesmo com o cruzamento de telefone correto.
+function lowercaseCodigoColumn(rows) {
+  if (!rows.length) return rows;
+  const codigoKey = Object.keys(rows[0]).find(
+    (h) => h.toLowerCase().includes('codigo') || h.toLowerCase().includes('código')
+  );
+  if (!codigoKey) return rows;
+  return rows.map((row) => ({ ...row, [codigoKey]: String(row[codigoKey] ?? '').toLowerCase() }));
+}
+
 /** Dispara uma varredura da pasta Retorno, ignorando se já houver uma em andamento. */
 function triggerCheckRetorno() {
   if (isChecking) {
@@ -97,7 +111,7 @@ async function processReturnedFile(fileName) {
     const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
 
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
-    const finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
+    const finalRows = lowercaseCodigoColumn(processCentrifugeReturn(originalRows, returnedRows, filterLevel));
     // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
     // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
     // então o arquivo final precisa manter o mesmo delimitador.
