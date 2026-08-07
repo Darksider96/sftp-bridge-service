@@ -10,9 +10,12 @@ const { detectPhonePairs, extractDddTelefone } = require('./mailingNormalizer');
  *   perdem a primeira linha e o pareamento de colunas abaixo não acha nenhum telefone.
  * @param {Record<string,string>[]} returnedData Dados devolvidos pela higienizadora (com coluna Score)
  * @param {'AGRESSIVA'|'MODERADA'} filterLevel Agressiva (corta 0,1,2) ou Moderada (corta 0,1)
+ * @param {{ddd: string|null, tel: string}[]} [explicitPairs] Pares DDD/telefone do layout_profile
+ *   vinculado ao cliente, se houver — usados no lugar da detecção heurística, pra ficar
+ *   consistente com o que o motor de envio já usou pra esse mesmo arquivo original.
  * @returns {Record<string,string>[]}
  */
-function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRESSIVA') {
+function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRESSIVA', explicitPairs) {
   if (!originalData.length || !returnedData.length) return [];
 
   // 1. Definir a nota de corte
@@ -55,7 +58,7 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
   // de detectIdColumn, senão ele podia "roubar" a própria coluna DDD como se
   // fosse o id e excluí-la do pareamento.
   const origHeaders = Object.keys(originalData[0]);
-  const pairs = detectPhonePairs(origHeaders, '');
+  const pairs = explicitPairs || detectPhonePairs(origHeaders, '');
 
   // 4. O PROCV: Filtrar a base original
   const finalResult = [];

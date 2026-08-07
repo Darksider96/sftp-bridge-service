@@ -13,18 +13,21 @@ const BUCKET = 'mailing-files';
 
 let isChecking = false;
 
-// O discador (Argus/Dazsoft) só reconhece/casa o cliente do lado deles se o
-// CODIGO vier em minúsculo. O arquivo original do cliente às vezes chega com
-// essa coluna em maiúsculo, então normaliza no arquivo final (pós-PROCV)
-// antes de disponibilizar pra envio — sem isso o discador não reconhece o
-// registro mesmo com o cruzamento de telefone correto.
-function lowercaseCodigoColumn(rows) {
+// O discador (Argus/Dazsoft) geralmente só reconhece/casa o cliente do lado
+// deles se o CODIGO vier em minúsculo. O arquivo original do cliente às vezes
+// chega com essa coluna em maiúsculo, então normaliza no arquivo final
+// (pós-PROCV) antes de disponibilizar pra envio — sem isso o discador não
+// reconhece o registro mesmo com o cruzamento de telefone correto. A caixa é
+// configurável por layout_profile (campo codigo_column_case); sem perfil
+// vinculado ao cliente, mantém o padrão histórico (minúscula).
+function applyCodigoColumnCase(rows, columnCase) {
   if (!rows.length) return rows;
   const codigoKey = Object.keys(rows[0]).find(
     (h) => h.toLowerCase().includes('codigo') || h.toLowerCase().includes('código')
   );
   if (!codigoKey) return rows;
-  return rows.map((row) => ({ ...row, [codigoKey]: String(row[codigoKey] ?? '').toLowerCase() }));
+  const transform = columnCase === 'upper' ? (v) => v.toUpperCase() : (v) => v.toLowerCase();
+  return rows.map((row) => ({ ...row, [codigoKey]: transform(String(row[codigoKey] ?? '')) }));
 }
 
 /** Dispara uma varredura da pasta Retorno, ignorando se já houver uma em andamento. */
@@ -110,8 +113,22 @@ async function processReturnedFile(fileName) {
     const originalRows = parseMailingCsv(originalCsv);
     const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
 
+    // Se o cliente tiver um perfil vinculado, usa o mapeamento explícito de
+    // colunas dele (mesma prioridade aplicada no motor de envio) em vez da
+    // detecção heurística, e a caixa de CODIGO configurada nele.
+    const layoutProfile = await resolveClientLayoutProfile(ticket.client_id);
+    const explicitPairs = layoutProfile
+      ? [{
+          ddd: layoutProfile.layout_type === 'separado' ? layoutProfile.ddd_main_column : null,
+          tel: layoutProfile.phone_main_column,
+        }]
+      : undefined;
+
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
-    const finalRows = lowercaseCodigoColumn(processCentrifugeReturn(originalRows, returnedRows, filterLevel));
+    const finalRows = applyCodigoColumnCase(
+      processCentrifugeReturn(originalRows, returnedRows, filterLevel, explicitPairs),
+      layoutProfile?.codigo_column_case || 'lower'
+    );
     // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
     // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
     // então o arquivo final precisa manter o mesmo delimitador.
@@ -164,6 +181,25 @@ async function processReturnedFile(fileName) {
     }
     throw err;
   }
+}
+
+/** Busca o layout_profile vinculado ao cliente do ticket, se houver algum. */
+async function resolveClientLayoutProfile(clientId) {
+  const { data: clientRow, error: clientError } = await supabaseAdmin
+    .from('profiles')
+    .select('layout_profile_id')
+    .eq('id', clientId)
+    .maybeSingle();
+  if (clientError || !clientRow?.layout_profile_id) return null;
+
+  const { data: profileRow, error: profileError } = await supabaseAdmin
+    .from('layout_profiles')
+    .select('layout_type, ddd_main_column, phone_main_column, codigo_column_case')
+    .eq('id', clientRow.layout_profile_id)
+    .maybeSingle();
+  if (profileError) return null;
+
+  return profileRow;
 }
 
 /**
