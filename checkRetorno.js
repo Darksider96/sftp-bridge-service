@@ -3,6 +3,7 @@ const { extractTicketId } = require('./ticketIdMatcher');
 const { matchTicketByFileName } = require('./fileNameMatcher');
 const { processCentrifugeReturn } = require('./csvProcessor');
 const { parseMailingCsv } = require('./mailingNormalizer');
+const { applyCodigoColumnCase, applyFinazRule, applyPhoneOverflowRule } = require('./profileRules');
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
 
@@ -12,23 +13,6 @@ const SFTP_RETORNO_DIR = process.env.SFTP_RETORNO_DIR || '/flag-contato/Retorno'
 const BUCKET = 'mailing-files';
 
 let isChecking = false;
-
-// O discador (Argus/Dazsoft) geralmente só reconhece/casa o cliente do lado
-// deles se o CODIGO vier em minúsculo. O arquivo original do cliente às vezes
-// chega com essa coluna em maiúsculo, então normaliza no arquivo final
-// (pós-PROCV) antes de disponibilizar pra envio — sem isso o discador não
-// reconhece o registro mesmo com o cruzamento de telefone correto. A caixa é
-// configurável por layout_profile (campo codigo_column_case); sem perfil
-// vinculado ao cliente, mantém o padrão histórico (minúscula).
-function applyCodigoColumnCase(rows, columnCase) {
-  if (!rows.length) return rows;
-  const codigoKey = Object.keys(rows[0]).find(
-    (h) => h.toLowerCase().includes('codigo') || h.toLowerCase().includes('código')
-  );
-  if (!codigoKey) return rows;
-  const transform = columnCase === 'upper' ? (v) => v.toUpperCase() : (v) => v.toLowerCase();
-  return rows.map((row) => ({ ...row, [codigoKey]: transform(String(row[codigoKey] ?? '')) }));
-}
 
 /** Dispara uma varredura da pasta Retorno, ignorando se já houver uma em andamento. */
 function triggerCheckRetorno() {
@@ -113,22 +97,21 @@ async function processReturnedFile(fileName) {
     const originalRows = parseMailingCsv(originalCsv);
     const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
 
-    // Se o cliente tiver um perfil vinculado, usa o mapeamento explícito de
-    // colunas dele (mesma prioridade aplicada no motor de envio) em vez da
-    // detecção heurística, e a caixa de CODIGO configurada nele.
+    // Regras fixas do cliente (se tiver perfil vinculado) — DDD/Telefone
+    // continuam 100% detectados por heurística em processCentrifugeReturn,
+    // o perfil só entra depois, nos ajustes que não dependem do layout do
+    // arquivo (FINAZ, quantidade de telefones, caixa da coluna CODIGO).
     const layoutProfile = await resolveClientLayoutProfile(ticket.client_id);
-    const explicitPairs = layoutProfile
-      ? [{
-          ddd: layoutProfile.layout_type === 'separado' ? layoutProfile.ddd_main_column : null,
-          tel: layoutProfile.phone_main_column,
-        }]
-      : undefined;
 
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
-    const finalRows = applyCodigoColumnCase(
-      processCentrifugeReturn(originalRows, returnedRows, filterLevel, explicitPairs),
-      layoutProfile?.codigo_column_case || 'lower'
+    let finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
+    if (layoutProfile?.is_finaz) finalRows = applyFinazRule(finalRows);
+    finalRows = applyPhoneOverflowRule(
+      finalRows,
+      layoutProfile?.max_phone_columns,
+      layoutProfile?.phone_overflow_action || 'exclude'
     );
+    finalRows = applyCodigoColumnCase(finalRows, layoutProfile?.codigo_column_case || 'lower');
     // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
     // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
     // então o arquivo final precisa manter o mesmo delimitador.
@@ -194,7 +177,7 @@ async function resolveClientLayoutProfile(clientId) {
 
   const { data: profileRow, error: profileError } = await supabaseAdmin
     .from('layout_profiles')
-    .select('layout_type, ddd_main_column, phone_main_column, codigo_column_case')
+    .select('is_finaz, codigo_column_case, max_phone_columns, phone_overflow_action')
     .eq('id', clientRow.layout_profile_id)
     .maybeSingle();
   if (profileError) return null;
