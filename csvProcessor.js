@@ -54,8 +54,11 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
   // passa uma string vazia — nenhum header real deve casar com isso — em vez
   // de detectIdColumn, senão ele podia "roubar" a própria coluna DDD como se
   // fosse o id e excluí-la do pareamento.
+  // Regra fixa (RF-003): só o primeiro telefone detectado conta pra aprovar
+  // a linha — é o único que de fato foi enviado à higienização (mesma regra
+  // aplicada no motor de envio, mailingNormalizer.js/normalizeMailing).
   const origHeaders = Object.keys(originalData[0]);
-  const pairs = detectPhonePairs(origHeaders, '');
+  const pairs = detectPhonePairs(origHeaders, '').slice(0, 1);
 
   // 4. O PROCV: Filtrar a base original
   const finalResult = [];

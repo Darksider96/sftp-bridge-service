@@ -85,9 +85,10 @@ test('arquivo original sem cabeçalho (layout "finaz"): PROCV ainda casa os tele
 
   const result = processCentrifugeReturn(originalRows, returnedRows, 'AGRESSIVA');
 
-  // O cliente 1 tem seu único telefone aprovado -> entra.
-  // O cliente 2 tem um telefone reprovado e outro aprovado -> entra (basta um bom).
-  assert.equal(result.length, 2);
+  // RF-003: só o primeiro telefone detectado decide a aprovação (é o único
+  // que de fato foi enviado à higienização). O cliente 1 tem seu único
+  // telefone aprovado -> entra. O cliente 2 tem o PRIMEIRO telefone
+  // reprovado -> não entra, mesmo tendo um segundo telefone aprovado.
+  assert.equal(result.length, 1);
   assert.equal(result[0].id, '30000000001');
-  assert.equal(result[1].id, '30000000002');
 });

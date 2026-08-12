@@ -3,7 +3,13 @@ const { extractTicketId } = require('./ticketIdMatcher');
 const { matchTicketByFileName } = require('./fileNameMatcher');
 const { processCentrifugeReturn } = require('./csvProcessor');
 const { parseMailingCsv } = require('./mailingNormalizer');
-const { applyCodigoColumnCase, applyFinazRule, applyPhoneOverflowRule } = require('./profileRules');
+const {
+  applyVanguardPattern,
+  applyFinazRule,
+  applyPhoneOverflowRule,
+  mergePhoneColumns,
+  buildFinalFileName,
+} = require('./profileRules');
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
 
@@ -98,20 +104,18 @@ async function processReturnedFile(fileName) {
     const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
 
     // Regras fixas do cliente (se tiver perfil vinculado) — DDD/Telefone
-    // continuam 100% detectados por heurística em processCentrifugeReturn,
-    // o perfil só entra depois, nos ajustes que não dependem do layout do
-    // arquivo (FINAZ, quantidade de telefones, caixa da coluna CODIGO).
+    // continuam 100% detectados por heurística em processCentrifugeReturn
+    // (RF-003: só o primeiro telefone conta), o perfil só entra depois, nos
+    // ajustes que não dependem do layout do arquivo (FINAZ, telefones
+    // excedentes, padrão Vanguard).
     const layoutProfile = await resolveClientLayoutProfile(ticket.client_id);
 
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
     let finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
     if (layoutProfile?.is_finaz) finalRows = applyFinazRule(finalRows);
-    finalRows = applyPhoneOverflowRule(
-      finalRows,
-      layoutProfile?.max_phone_columns,
-      layoutProfile?.phone_overflow_action || 'exclude'
-    );
-    finalRows = applyCodigoColumnCase(finalRows, layoutProfile?.codigo_column_case || 'lower');
+    finalRows = applyPhoneOverflowRule(finalRows, layoutProfile?.phone_overflow_action || 'exclude');
+    finalRows = mergePhoneColumns(finalRows);
+    finalRows = applyVanguardPattern(finalRows, layoutProfile?.is_vanguard || false);
     // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
     // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
     // então o arquivo final precisa manter o mesmo delimitador.
@@ -140,7 +144,7 @@ async function processReturnedFile(fileName) {
       .from('tickets')
       .update({
         processed_file_url: processedUploadPath,
-        processed_file_name: ticket.original_file_name,
+        processed_file_name: buildFinalFileName(ticket.original_file_name, filterLevel),
         status_id: higienizadoStatus.id,
       })
       .eq('id', ticket.id);
@@ -177,7 +181,7 @@ async function resolveClientLayoutProfile(clientId) {
 
   const { data: profileRow, error: profileError } = await supabaseAdmin
     .from('layout_profiles')
-    .select('is_finaz, codigo_column_case, max_phone_columns, phone_overflow_action')
+    .select('is_finaz, is_vanguard, phone_overflow_action')
     .eq('id', clientRow.layout_profile_id)
     .maybeSingle();
   if (profileError) return null;
