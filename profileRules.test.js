@@ -23,14 +23,17 @@ test('applyVanguardPattern: sem coluna codigo, retorna linhas inalteradas', () =
   assert.deepEqual(applyVanguardPattern(rows, true), rows);
 });
 
-test('applyFinazRule: duplica a primeira coluna que bate com id/codigo/finaz no inicio do arquivo', () => {
+test('applyFinazRule: substitui a coluna que bate com id/codigo/finaz na MESMA posicao (nao move pro inicio)', () => {
+  // Bug real encontrado em producao (2026-08-13): mover pro inicio do arquivo
+  // quebrava clientes cujo discador le o arquivo por posicao de coluna, nao
+  // por nome. A ordem final tem que bater com a do arquivo original.
   const rows = [{ Nome: 'Foo', Codigo: 'ABC123', Telefone: '11999999999' }];
   const result = applyFinazRule(rows);
 
   assert.equal(result[0].CodigoFinaz, 'ABC123');
   assert.equal(result[0].ProspeccaoId, 'ABC123');
   assert.equal('Codigo' in result[0], false);
-  assert.deepEqual(Object.keys(result[0]), ['CodigoFinaz', 'ProspeccaoId', 'Nome', 'Telefone']);
+  assert.deepEqual(Object.keys(result[0]), ['Nome', 'CodigoFinaz', 'ProspeccaoId', 'Telefone']);
 });
 
 test('applyFinazRule: sem coluna id/codigo/finaz, usa a primeira coluna como fallback', () => {
@@ -40,6 +43,7 @@ test('applyFinazRule: sem coluna id/codigo/finaz, usa a primeira coluna como fal
   assert.equal(result[0].CodigoFinaz, 'Foo');
   assert.equal(result[0].ProspeccaoId, 'Foo');
   assert.equal('Nome' in result[0], false);
+  assert.deepEqual(Object.keys(result[0]), ['CodigoFinaz', 'ProspeccaoId', 'Telefone']);
 });
 
 test('applyFinazRule: array vazio retorna vazio', () => {
@@ -131,6 +135,6 @@ test('buildFinalFileName: sufixo AGRESSIVA antes da extensao', () => {
   assert.equal(buildFinalFileName('mailing.csv', 'AGRESSIVA'), 'mailing_HIG_AGRESSIVA.csv');
 });
 
-test('buildFinalFileName: arquivo sem extensao, sufixo vai no final', () => {
-  assert.equal(buildFinalFileName('mailing', 'MODERADA'), 'mailing_HIG_MODERADA');
+test('buildFinalFileName: nome do mailing sem extensao (caso comum) ganha .csv no final', () => {
+  assert.equal(buildFinalFileName('teste 4 Johnatan', 'AGRESSIVA'), 'teste 4 Johnatan_HIG_AGRESSIVA.csv');
 });

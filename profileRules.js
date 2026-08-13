@@ -15,16 +15,28 @@ function applyVanguardPattern(rows, isVanguard) {
   return rows.map((row) => ({ ...row, [codigoKey]: String(row[codigoKey] ?? '').toLowerCase() }));
 }
 
-// Regra FINAZ: duplica o valor da primeira coluna ID/CÓDIGO/FINAZ em duas
-// colunas novas (CodigoFinaz, ProspeccaoId) no início do arquivo, removendo a
-// coluna original. Configurável por layout_profile (campo is_finaz).
+// Regra FINAZ: substitui a coluna ID/CÓDIGO/FINAZ, na MESMA posição em que
+// ela estava, por duas colunas (CodigoFinaz, ProspeccaoId) com o mesmo valor.
+// Importante manter a ordem das colunas igual à do arquivo original — o
+// discador do cliente pode ler o arquivo por posição, não só por nome de
+// coluna (bug real encontrado em produção: mover pro início quebrava isso).
+// Configurável por layout_profile (campo is_finaz).
 function applyFinazRule(rows) {
   if (!rows.length) return rows;
   const headers = Object.keys(rows[0]);
   const idColumn = headers.find((h) => /id|codigo|código|finaz/i.test(h)) || headers[0];
   return rows.map((row) => {
-    const { [idColumn]: idValue, ...rest } = row;
-    return { CodigoFinaz: idValue ?? '', ProspeccaoId: idValue ?? '', ...rest };
+    const idValue = row[idColumn] ?? '';
+    const result = {};
+    for (const key of Object.keys(row)) {
+      if (key === idColumn) {
+        result.CodigoFinaz = idValue;
+        result.ProspeccaoId = idValue;
+      } else {
+        result[key] = row[key];
+      }
+    }
+    return result;
   });
 }
 
@@ -78,13 +90,15 @@ function mergePhoneColumns(rows) {
 
 // RF-014: sufixo indicando o filtro aplicado, usado tanto no nome salvo para
 // download quanto no nome enviado à API do discador (os dois consomem
-// tickets.processed_file_name).
-function buildFinalFileName(originalName, filterLevel) {
+// tickets.processed_file_name). Base é o nome do Mailing (não o nome do
+// arquivo original que o cliente subiu) — geralmente sem extensão, então
+// garante ".csv" quando não tiver nenhuma.
+function buildFinalFileName(baseName, filterLevel) {
   const suffix = filterLevel === 'MODERADA' ? '_HIG_MODERADA' : '_HIG_AGRESSIVA';
-  const dotIndex = originalName.lastIndexOf('.');
+  const dotIndex = baseName.lastIndexOf('.');
   return dotIndex === -1
-    ? `${originalName}${suffix}`
-    : `${originalName.slice(0, dotIndex)}${suffix}${originalName.slice(dotIndex)}`;
+    ? `${baseName}${suffix}.csv`
+    : `${baseName.slice(0, dotIndex)}${suffix}${baseName.slice(dotIndex)}`;
 }
 
 module.exports = {

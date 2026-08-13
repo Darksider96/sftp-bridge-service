@@ -13,7 +13,7 @@ const {
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
 
-const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, processed_file_url';
+const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url';
 
 const SFTP_RETORNO_DIR = process.env.SFTP_RETORNO_DIR || '/flag-contato/Retorno';
 const BUCKET = 'mailing-files';
@@ -149,7 +149,10 @@ async function processReturnedFile(fileName) {
       .from('tickets')
       .update({
         processed_file_url: processedUploadPath,
-        processed_file_name: buildFinalFileName(ticket.original_file_name, filterLevel),
+        // Nome do Mailing (não o nome do arquivo original que o cliente subiu) —
+        // é o que o cliente reconhece na tela, e o que precisa aparecer no
+        // download/envio à API.
+        processed_file_name: buildFinalFileName(ticket.mailing_name, filterLevel),
         status_id: higienizadoStatus.id,
       })
       .eq('id', ticket.id);
