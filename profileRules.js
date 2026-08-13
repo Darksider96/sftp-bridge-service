@@ -4,15 +4,26 @@
 const { detectPhonePairs } = require('./mailingNormalizer');
 
 // "Padrão Vanguard": o discador (Argus/Dazsoft) só reconhece/casa o cliente
-// do lado deles se o CODIGO vier em minúsculo. Opt-in por cliente (campo
-// is_vanguard do perfil) — sem o perfil marcado, a coluna não é alterada.
+// do lado deles se o CABEÇALHO da coluna CODIGO vier em minúsculo — o VALOR
+// da coluna não é alterado, só o nome da coluna (ex: "CODIGO" -> "codigo").
+// Opt-in por cliente (campo is_vanguard do perfil) — sem o perfil marcado,
+// a coluna não é alterada.
 function applyVanguardPattern(rows, isVanguard) {
   if (!isVanguard || !rows.length) return rows;
   const codigoKey = Object.keys(rows[0]).find(
     (h) => h.toLowerCase().includes('codigo') || h.toLowerCase().includes('código')
   );
   if (!codigoKey) return rows;
-  return rows.map((row) => ({ ...row, [codigoKey]: String(row[codigoKey] ?? '').toLowerCase() }));
+  const lowerKey = codigoKey.toLowerCase();
+  if (lowerKey === codigoKey) return rows;
+
+  return rows.map((row) => {
+    const result = {};
+    for (const key of Object.keys(row)) {
+      result[key === codigoKey ? lowerKey : key] = row[key];
+    }
+    return result;
+  });
 }
 
 // Regra FINAZ: substitui a coluna ID/CÓDIGO/FINAZ, na MESMA posição em que

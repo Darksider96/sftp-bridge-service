@@ -8,13 +8,20 @@ const {
   buildFinalFileName,
 } = require('./profileRules');
 
-test('applyVanguardPattern: habilitado transforma o valor da coluna CODIGO para minuscula', () => {
+test('applyVanguardPattern: habilitado deixa o CABECALHO da coluna CODIGO em minuscula, sem mexer no valor', () => {
   const result = applyVanguardPattern([{ CODIGO: 'ABC123', Nome: 'Foo' }], true);
-  assert.equal(result[0].CODIGO, 'abc123');
+  assert.equal('CODIGO' in result[0], false);
+  assert.equal(result[0].codigo, 'ABC123');
+  assert.deepEqual(Object.keys(result[0]), ['codigo', 'Nome']);
+});
+
+test('applyVanguardPattern: cabecalho ja minusculo fica igual (no-op)', () => {
+  const rows = [{ codigo: 'ABC123', Nome: 'Foo' }];
+  assert.deepEqual(applyVanguardPattern(rows, true), rows);
 });
 
 test('applyVanguardPattern: desabilitado nao mexe na coluna', () => {
-  const rows = [{ codigo: 'ABC123', Nome: 'Foo' }];
+  const rows = [{ CODIGO: 'ABC123', Nome: 'Foo' }];
   assert.deepEqual(applyVanguardPattern(rows, false), rows);
 });
 
@@ -50,17 +57,20 @@ test('applyFinazRule: array vazio retorna vazio', () => {
   assert.deepEqual(applyFinazRule([]), []);
 });
 
-test('Vanguard + FINAZ juntos: CodigoFinaz e ProspeccaoId saem identicos (ambos minusculos)', () => {
-  // Regressao de bug real encontrado em teste em producao (2026-08-12): rodar
-  // FINAZ antes do Vanguard faz o Vanguard achar "CodigoFinaz" (contem
-  // "codigo" no nome) em vez da coluna original, deixando CodigoFinaz e
-  // ProspeccaoId com valores diferentes quando deveriam ser identicos.
-  const rows = [{ codigo: 'TESTE001', nome: 'Fulano', tel: '11988887777' }];
+test('Vanguard + FINAZ juntos: CodigoFinaz e ProspeccaoId saem identicos, valor original preservado', () => {
+  // Regressao de bug real encontrado em producao (2026-08-12): rodar FINAZ
+  // antes do Vanguard faz o Vanguard achar "CodigoFinaz" (contem "codigo" no
+  // nome) em vez da coluna original, e so renomear ESSA, deixando
+  // CodigoFinaz e ProspeccaoId com nomes/valores divergentes quando
+  // deveriam ser identicos.
+  const rows = [{ CODIGO: 'TESTE001', nome: 'Fulano', tel: '11988887777' }];
   const afterVanguard = applyVanguardPattern(rows, true);
+  assert.deepEqual(Object.keys(afterVanguard[0]), ['codigo', 'nome', 'tel']);
+
   const result = applyFinazRule(afterVanguard);
 
-  assert.equal(result[0].CodigoFinaz, 'teste001');
-  assert.equal(result[0].ProspeccaoId, 'teste001');
+  assert.equal(result[0].CodigoFinaz, 'TESTE001');
+  assert.equal(result[0].ProspeccaoId, 'TESTE001');
   assert.equal(result[0].CodigoFinaz, result[0].ProspeccaoId);
 });
 
