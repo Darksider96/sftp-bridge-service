@@ -46,6 +46,20 @@ test('applyFinazRule: array vazio retorna vazio', () => {
   assert.deepEqual(applyFinazRule([]), []);
 });
 
+test('Vanguard + FINAZ juntos: CodigoFinaz e ProspeccaoId saem identicos (ambos minusculos)', () => {
+  // Regressao de bug real encontrado em teste em producao (2026-08-12): rodar
+  // FINAZ antes do Vanguard faz o Vanguard achar "CodigoFinaz" (contem
+  // "codigo" no nome) em vez da coluna original, deixando CodigoFinaz e
+  // ProspeccaoId com valores diferentes quando deveriam ser identicos.
+  const rows = [{ codigo: 'TESTE001', nome: 'Fulano', tel: '11988887777' }];
+  const afterVanguard = applyVanguardPattern(rows, true);
+  const result = applyFinazRule(afterVanguard);
+
+  assert.equal(result[0].CodigoFinaz, 'teste001');
+  assert.equal(result[0].ProspeccaoId, 'teste001');
+  assert.equal(result[0].CodigoFinaz, result[0].ProspeccaoId);
+});
+
 function withThreePhones() {
   return [{
     CPF: '1',

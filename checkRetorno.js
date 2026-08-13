@@ -112,10 +112,15 @@ async function processReturnedFile(fileName) {
 
     const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
     let finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
+    // Vanguard PRECISA rodar antes do FINAZ: ambos localizam a coluna pelo nome
+    // conter "codigo", e o FINAZ cria uma coluna nova chamada CodigoFinaz — se
+    // o Vanguard rodasse depois, ele acharia CodigoFinaz em vez da coluna
+    // original e deixaria CodigoFinaz/ProspeccaoId com valores diferentes
+    // (quando deveriam ser idênticos). Testado em produção em 2026-08-12.
+    finalRows = applyVanguardPattern(finalRows, layoutProfile?.is_vanguard || false);
     if (layoutProfile?.is_finaz) finalRows = applyFinazRule(finalRows);
     finalRows = applyPhoneOverflowRule(finalRows, layoutProfile?.phone_overflow_action || 'exclude');
     finalRows = mergePhoneColumns(finalRows);
-    finalRows = applyVanguardPattern(finalRows, layoutProfile?.is_vanguard || false);
     // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
     // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
     // então o arquivo final precisa manter o mesmo delimitador.
