@@ -242,7 +242,13 @@ test('layout real "finaz": CSV sem nenhuma linha de cabeçalho, id;nome;5 telefo
   const rows = parseMailingCsv(csv);
   // A primeira linha (dado de verdade) não pode ter sido perdida como se fosse cabeçalho.
   assert.equal(rows.length, 4);
-  assert.equal(rows[0].id, '30000000001');
+  assert.equal(rows[0].ID, '30000000001');
+  // Nomes sintéticos precisam ser "de gente" (ID/NOME/TELEFONE_N), não
+  // rótulo interno tipo "campo_1" — esse mesmo objeto acaba virando o
+  // cabeçalho do arquivo final que vai pro discador.
+  assert.equal(rows[0].NOME, 'FULANO DA SILVA');
+  assert.equal(rows[0].TELEFONE1, '41912340001');
+  assert.equal('campo_2' in rows[0], false);
 
   const { rows: out, report } = normalizeMailing(rows);
   assert.deepEqual(out, [
@@ -255,6 +261,33 @@ test('layout real "finaz": CSV sem nenhuma linha de cabeçalho, id;nome;5 telefo
     { id: '30000000004', ddd: '11', telefone: '995620007' },
   ]);
   assert.equal(report.invalidSkipped, 0);
+});
+
+test('layout real "finaz": nomes com "id"/"cel"/"tel" no meio da palavra nao viram falso cabecalho', () => {
+  // Bug real encontrado em producao (2026-08-18), com arquivo real do
+  // cliente: "MARIA APARECIDA..." contem a substring "id" (candidato de
+  // coluna ID), "MARCELO"/"CASTELO" contem "cel"/"tel" — a comparacao por
+  // substring solta fazia looksLikeRealHeader() achar que a primeira LINHA
+  // DE DADO era cabecalho, e o arquivo inteiro falhava ("nenhuma coluna de
+  // telefone encontrada").
+  const csv = [
+    '15022733086;MARIA APARECIDA R RAMPASO;11972999640;11997571519;;',
+    '15022732900;MARCELO CASTELO BRANCO;31988646357;;;',
+  ].join('\n');
+
+  const rows = parseMailingCsv(csv);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].ID, '15022733086');
+  assert.equal(rows[0].NOME, 'MARIA APARECIDA R RAMPASO');
+  assert.equal(rows[0].TELEFONE1, '11972999640');
+  assert.equal(rows[0].TELEFONE2, '11997571519');
+
+  const { rows: out } = normalizeMailing(rows);
+  assert.deepEqual(out, [
+    { id: '15022733086', ddd: '11', telefone: '972999640' },
+    { id: '15022733086', ddd: '11', telefone: '997571519' },
+    { id: '15022732900', ddd: '31', telefone: '988646357' },
+  ]);
 });
 
 test('parseMailingCsv: arquivo com cabeçalho de verdade continua sendo lido como cabeçalho', () => {

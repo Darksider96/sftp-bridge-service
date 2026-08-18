@@ -90,5 +90,5 @@ test('arquivo original sem cabeçalho (layout "finaz"): PROCV ainda casa os tele
   // telefone aprovado -> entra. O cliente 2 tem o PRIMEIRO telefone
   // reprovado -> não entra, mesmo tendo um segundo telefone aprovado.
   assert.equal(result.length, 1);
-  assert.equal(result[0].id, '30000000001');
+  assert.equal(result[0].ID, '30000000001');
 });

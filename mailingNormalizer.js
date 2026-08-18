@@ -242,10 +242,22 @@ function normalizeMailing(rows, options = {}) {
 // num CPF/telefone/nome de pessoa. Usado só para decidir se a primeira linha
 // do arquivo é cabeçalho ou já é dado — não usado para escolher qual coluna é
 // qual (isso é papel de detectIdColumn/detectPhonePairs).
-const HEADER_KEYWORDS = ['ddd', 'tel', 'cel', 'fone', 'phone', ...ID_COLUMN_CANDIDATES, 'nome'];
+const HEADER_KEYWORDS = ['ddd', 'tel', 'telefone', 'cel', 'celular', 'fone', 'phone', ...ID_COLUMN_CANDIDATES, 'nome'];
 
+// Compara por TOKEN inteiro (não substring solta) — bug real encontrado em
+// produção (2026-08-18): substring simples fazia "APARECIDA"/"CÂNDIDO"/
+// "MARCELO"/"CASTELO" (nomes de pessoa reais) casarem com os candidatos
+// "id"/"cel"/"tel" só por conterem essas letras no meio da palavra, fazendo
+// a primeira LINHA DE DADO de um arquivo sem cabeçalho (ex: layout "finaz")
+// ser lida como se fosse cabeçalho — a linha inteira sumia do processamento.
 function looksLikeRealHeader(headerFields) {
-  return headerFields.some((h) => HEADER_KEYWORDS.some((k) => normalizeHeader(String(h)).includes(k)));
+  return headerFields.some((h) => {
+    const tokens = normalizeHeader(String(h))
+      .split(/[^\p{L}\p{N}]+/u)
+      .map((t) => t.replace(/\d+$/, ''))
+      .filter(Boolean);
+    return tokens.some((t) => HEADER_KEYWORDS.includes(t));
+  });
 }
 
 /** Amostra os valores de uma coluna (por posição) e decide se parecem telefone. */
@@ -258,13 +270,19 @@ function looksLikePhoneColumn(values) {
 
 /**
  * Alguns clientes mandam arquivo sem nenhuma linha de cabeçalho (ex: layout
- * "finaz": id;nome;telefone1;telefone2;telefone3;telefone4;telefone5, direto
- * com dado na primeira linha). Sem cabeçalho pra ler nome de coluna, a única
- * forma de saber o papel de cada posição é olhar o formato dos valores:
- * colunas onde a maioria dos valores "parece telefone" viram telefone_N (na
- * ordem em que aparecem); a primeira coluna que sobra vira o id (mesma regra
- * de fallback que detectIdColumn já usa: primeira coluna quando nada bate por
- * nome); o resto é ignorado.
+ * "finaz" recebido via CRM/n8n: id;nome;telefone1;telefone2;telefone3;
+ * telefone4;telefone5, direto com dado na primeira linha). Sem cabeçalho pra
+ * ler nome de coluna, a única forma de saber o papel de cada posição é olhar
+ * o formato dos valores: colunas onde a maioria dos valores "parece
+ * telefone" viram TELEFONE_N (na ordem em que aparecem); a primeira coluna
+ * que sobra vira ID (mesma regra de fallback que detectIdColumn já usa:
+ * primeira coluna quando nada bate por nome); a segunda coluna que sobra
+ * vira NOME. Esses nomes (ID/NOME/TELEFONE_N) não são só internos — o motor
+ * de retorno reaproveita as mesmas chaves no arquivo final (download/API),
+ * então usar nomes "de gente" aqui evita vazar rótulo interno tipo "campo_1"
+ * pro arquivo que vai pro discador. Colunas além dessas, sem nenhum valor
+ * preenchido (ex: sobra de padding até a coluna 7 que o CRM sempre manda),
+ * são descartadas; com valor, ficam como campo_N pra não perder dado.
  */
 function synthesizeRowsFromPositions(rawRows) {
   if (!rawRows.length) return [];
@@ -273,16 +291,20 @@ function synthesizeRowsFromPositions(rawRows) {
   const colNames = [];
   let phoneIdx = 0;
   let idAssigned = false;
+  let nomeAssigned = false;
 
   for (let c = 0; c < numCols; c++) {
     const values = rawRows.map((r) => r[c] || '');
     if (looksLikePhoneColumn(values)) {
       phoneIdx++;
-      colNames[c] = `telefone_${phoneIdx}`;
+      colNames[c] = `TELEFONE${phoneIdx}`;
     } else if (!idAssigned) {
-      colNames[c] = 'id';
+      colNames[c] = 'ID';
       idAssigned = true;
-    } else {
+    } else if (!nomeAssigned) {
+      colNames[c] = 'NOME';
+      nomeAssigned = true;
+    } else if (values.some((v) => v.trim() !== '')) {
       colNames[c] = `campo_${c}`;
     }
   }
@@ -290,6 +312,7 @@ function synthesizeRowsFromPositions(rawRows) {
   return rawRows.map((row) => {
     const obj = {};
     colNames.forEach((name, c) => {
+      if (!name) return;
       obj[name] = row[c] || '';
     });
     return obj;
