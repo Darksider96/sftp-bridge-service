@@ -80,20 +80,27 @@ function applyPhoneOverflowRule(rows, action) {
 // applyPhoneOverflowRule) numa coluna só, só dígitos. Só se aplica no
 // arquivo final (download/API) — o arquivo enviado à higienizadora continua
 // com CPF;DDD;Telefone separados (mailingNormalizer.js). Se o layout já é
-// "junto" (DDD embutido no telefone, sem coluna DDD separada), não há nada
-// pra fundir.
+// "junto" (DDD embutido no telefone, sem coluna DDD separada), não há
+// coluna pra fundir, mas o VALOR ainda precisa ser limpo — bug real em
+// produção (2026-08-19): cliente mandou telefone formatado, ex: "(35)
+// 99955-1836", numa coluna só; como não havia DDD separado, a função
+// devolvia a linha sem mexer, e o arquivo final saía com espaço/parênteses/
+// traço no telefone. Nenhuma coluna de telefone pode sair com caractere
+// especial — só dígitos. Colunas de texto (nome, CPF, email etc.) não são
+// tocadas aqui.
 function mergePhoneColumns(rows) {
   if (!rows.length) return rows;
   const headers = Object.keys(rows[0]);
   const pair = detectPhonePairs(headers, '')[0];
-  if (!pair || !pair.ddd) return rows;
+  if (!pair) return rows;
 
   return rows.map((row) => {
-    const merged = `${String(row[pair.ddd] ?? '').replace(/\D/g, '')}${String(row[pair.tel] ?? '').replace(/\D/g, '')}`;
+    const dddDigits = pair.ddd ? String(row[pair.ddd] ?? '').replace(/\D/g, '') : '';
+    const telDigits = String(row[pair.tel] ?? '').replace(/\D/g, '');
     const result = {};
     for (const key of Object.keys(row)) {
-      if (key === pair.ddd) continue;
-      result[key] = key === pair.tel ? merged : row[key];
+      if (pair.ddd && key === pair.ddd) continue;
+      result[key] = key === pair.tel ? `${dddDigits}${telDigits}` : row[key];
     }
     return result;
   });

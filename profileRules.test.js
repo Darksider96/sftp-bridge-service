@@ -128,9 +128,23 @@ test('mergePhoneColumns: limpa caracteres nao numericos antes de fundir', () => 
   assert.equal(result[0].Telefone, '11999999999');
 });
 
-test('mergePhoneColumns: layout "junto" (sem coluna DDD separada) nao muda nada', () => {
+test('mergePhoneColumns: layout "junto" (sem coluna DDD separada) mantem a coluna, valor ja limpo nao muda', () => {
   const rows = [{ CPF: '1', Telefone: '11999999999' }];
   assert.deepEqual(mergePhoneColumns(rows), rows);
+});
+
+test('mergePhoneColumns: layout "junto" com telefone formatado -- limpa espaco/parenteses/traco mesmo sem coluna DDD separada', () => {
+  // Bug real em producao (2026-08-19): cliente mandou telefone formatado
+  // numa unica coluna (sem DDD separado) -- por nao ter par DDD, a funcao
+  // devolvia a linha sem mexer, e o arquivo final saia com caractere
+  // especial no telefone. Nenhuma coluna de telefone pode sair assim,
+  // mesmo em layout "junto".
+  const rows = [{ nome: 'FULANO', cpf: '123.456.789-00', TEL_1: '(35) 99955-1836' }];
+  const result = mergePhoneColumns(rows);
+  assert.equal(result[0].TEL_1, '35999551836');
+  // Colunas de texto (nome, CPF) nao sao tocadas.
+  assert.equal(result[0].nome, 'FULANO');
+  assert.equal(result[0].cpf, '123.456.789-00');
 });
 
 test('mergePhoneColumns: array vazio retorna vazio', () => {
