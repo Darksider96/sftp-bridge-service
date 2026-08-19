@@ -281,8 +281,12 @@ function looksLikePhoneColumn(values) {
  * de retorno reaproveita as mesmas chaves no arquivo final (download/API),
  * então usar nomes "de gente" aqui evita vazar rótulo interno tipo "campo_1"
  * pro arquivo que vai pro discador. Colunas além dessas, sem nenhum valor
- * preenchido (ex: sobra de padding até a coluna 7 que o CRM sempre manda),
- * são descartadas; com valor, ficam como campo_N pra não perder dado.
+ * preenchido além de TELEFONE1-5 (raro), com valor ficam como campo_N pra
+ * não perder dado. As colunas TELEFONE1..TELEFONE5 sempre existem no
+ * resultado, mesmo vazias — é o padrão fixo desse layout (Henrique -
+ * Venditore, 2026-08-18: "sempre criar até a Coluna 7 e deixar as sem
+ * informação vazias"), pra manter o cabeçalho igual em todos os arquivos
+ * desse cliente, mesmo quando um lote específico só usa 1 ou 2 telefones.
  */
 function synthesizeRowsFromPositions(rawRows) {
   if (!rawRows.length) return [];
@@ -309,7 +313,7 @@ function synthesizeRowsFromPositions(rawRows) {
     }
   }
 
-  return rawRows.map((row) => {
+  const rows = rawRows.map((row) => {
     const obj = {};
     colNames.forEach((name, c) => {
       if (!name) return;
@@ -317,6 +321,14 @@ function synthesizeRowsFromPositions(rawRows) {
     });
     return obj;
   });
+
+  const MAX_TELEFONE_COLUMNS = 5;
+  for (let i = phoneIdx + 1; i <= MAX_TELEFONE_COLUMNS; i++) {
+    const key = `TELEFONE${i}`;
+    rows.forEach((r) => { r[key] = ''; });
+  }
+
+  return rows;
 }
 
 /**

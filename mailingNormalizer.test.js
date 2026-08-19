@@ -281,6 +281,13 @@ test('layout real "finaz": nomes com "id"/"cel"/"tel" no meio da palavra nao vir
   assert.equal(rows[0].NOME, 'MARIA APARECIDA R RAMPASO');
   assert.equal(rows[0].TELEFONE1, '11972999640');
   assert.equal(rows[0].TELEFONE2, '11997571519');
+  // TELEFONE1..5 sempre existem, mesmo esse lote so usando 2 -- cabecalho
+  // fica igual entre arquivos desse cliente, mesmo variando quantos
+  // telefones cada lote usa (Henrique - Venditore, 2026-08-18).
+  assert.equal(rows[0].TELEFONE3, '');
+  assert.equal(rows[0].TELEFONE4, '');
+  assert.equal(rows[0].TELEFONE5, '');
+  assert.deepEqual(Object.keys(rows[0]), ['ID', 'NOME', 'TELEFONE1', 'TELEFONE2', 'TELEFONE3', 'TELEFONE4', 'TELEFONE5']);
 
   const { rows: out } = normalizeMailing(rows);
   assert.deepEqual(out, [
