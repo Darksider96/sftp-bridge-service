@@ -56,6 +56,19 @@ function normalizeHeader(header) {
   return header.trim().toLowerCase();
 }
 
+// Compara por TOKEN (prefixo de uma palavra inteira do cabeçalho), não
+// substring solta em qualquer posição — bug real em produção (2026-08-25):
+// "Valor_Parcela"/"Parcelas_Paga"/"Parcelas_Restante" contêm "cel" no meio
+// da palavra ("par-CEL-a"), e a checagem por substring solta fazia essas
+// colunas (dados de parcela do empréstimo, nada a ver com telefone) serem
+// tratadas como telefone e apagadas do arquivo final. startsWith por token
+// ainda casa variações reais de cabeçalho ("Telefone1", "DDD 2", "Cel"),
+// só não casa mais keyword no MEIO de uma palavra não relacionada.
+function headerHasToken(header, keyword) {
+  const tokens = normalizeHeader(header).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return tokens.some((t) => t.startsWith(keyword));
+}
+
 function isValidDdd(dddDigits) {
   if (dddDigits.length !== 2) return false;
   return VALID_DDDS.has(parseInt(dddDigits, 10));
@@ -95,7 +108,7 @@ function detectIdColumn(headers, explicitIdColumn) {
     if (exact) return exact;
   }
   for (const candidate of ID_COLUMN_CANDIDATES) {
-    const partial = headers.find((h) => normalizeHeader(h).includes(candidate));
+    const partial = headers.find((h) => headerHasToken(h, candidate));
     if (partial) return partial;
   }
   return headers[0];
@@ -111,11 +124,11 @@ function detectIdColumn(headers, explicitIdColumn) {
  * sem DDD pareado — o DDD pode estar embutido no próprio número.
  */
 function detectPhonePairs(headers, idColumn) {
-  const dddCols = headers.filter((h) => h !== idColumn && normalizeHeader(h).includes('ddd'));
+  const dddCols = headers.filter((h) => h !== idColumn && headerHasToken(h, 'ddd'));
   const telCols = headers.filter((h) => {
     if (h === idColumn) return false;
-    const n = normalizeHeader(h);
-    return !n.includes('ddd') && (n.includes('tel') || n.includes('cel') || n.includes('fone'));
+    if (headerHasToken(h, 'ddd')) return false;
+    return headerHasToken(h, 'tel') || headerHasToken(h, 'cel') || headerHasToken(h, 'fone');
   });
 
   const dddBySuffix = new Map();

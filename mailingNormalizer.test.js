@@ -213,6 +213,24 @@ test('layout real: cabeçalhos duplicados ddd;tel;ddd;tel;ddd;tel + colunas extr
   assert.equal(report.phonesExtracted, 3);
 });
 
+test('layout real: colunas de parcela ("Valor_Parcela", "Parcelas_Paga"/"Restante") nao sao confundidas com telefone', () => {
+  // Bug real em producao (2026-08-25): "Valor_Parcela" e "Parcelas_Paga"/
+  // "Parcelas_Restante" contem a substring "cel" no meio da palavra
+  // ("par-CEL-a") -- a checagem antiga por substring solta tratava essas
+  // colunas (dado de parcela do emprestimo, nada a ver com telefone) como
+  // telefone excedente e apagava elas do arquivo final do cliente.
+  const rows = parseSemicolon(
+    'CPF;Nome;DDD;Telefone;Contrato;Prazo;Valor_Parcela;Taxa;Parcelas_Paga;Parcelas_Restante;UF\n' +
+    '11111111111;FULANO;17;991110001;CTR001;96;1331.76;2.03;11;82;MG'
+  );
+  const pairs = detectPhonePairs(Object.keys(rows[0]), detectIdColumn(Object.keys(rows[0])));
+  assert.deepEqual(pairs, [{ ddd: 'DDD', tel: 'Telefone' }]);
+
+  const { rows: out, report } = normalizeMailing(rows);
+  assert.deepEqual(out, [{ id: '11111111111', ddd: '17', telefone: '991110001' }]);
+  assert.equal(report.phonesExtracted, 1);
+});
+
 test('layout real: TELEFONE1..5 sem coluna DDD, identificador é CODIGO (não NOME)', () => {
   const rows = parseSemicolon(
     'TELEFONE1;TELEFONE2;TELEFONE3;TELEFONE4;TELEFONE5;NOME;CODIGO\n' +
