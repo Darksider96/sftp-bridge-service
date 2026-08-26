@@ -315,6 +315,23 @@ test('layout real "finaz": nomes com "id"/"cel"/"tel" no meio da palavra nao vir
   ]);
 });
 
+test('layout real: coluna "dddtel" com DDD+celular grudados no mesmo campo', () => {
+  // Bug real em produção (2026-08-26): cabeçalho "dddtel" virava um token só
+  // que batia com "ddd" por startsWith, a coluna era classificada só como DDD
+  // e sumia do pareamento de telefone -- normalizeMailing lançava "Nenhuma
+  // coluna de telefone/DDD encontrada" e o envio inteiro falhava.
+  const rows = parseSemicolon(
+    'cpf;nome;dddtel;nu-nb;esp;dt-nasc;idade;vl-atual-benef;margem_dip;margem_rmc;total\n' +
+    '97917451534;LUCIANA LOPES DE ARAUJO;74999623179;2431732430;41;08/04/1971;55;648,40;81,05;;2593,60'
+  );
+  const pairs = detectPhonePairs(Object.keys(rows[0]), detectIdColumn(Object.keys(rows[0])));
+  assert.deepEqual(pairs, [{ ddd: null, tel: 'dddtel' }]);
+
+  const { rows: out, report } = normalizeMailing(rows);
+  assert.deepEqual(out, [{ id: '97917451534', ddd: '74', telefone: '999623179' }]);
+  assert.equal(report.invalidSkipped, 0);
+});
+
 test('parseMailingCsv: arquivo com cabeçalho de verdade continua sendo lido como cabeçalho', () => {
   const csv = 'CPF;Nome;Telefone\n11111111111;Fulano;11999998888';
   const rows = parseMailingCsv(csv);

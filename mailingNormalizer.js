@@ -69,6 +69,18 @@ function headerHasToken(header, keyword) {
   return tokens.some((t) => t.startsWith(keyword));
 }
 
+// Detecta cabeçalho onde DDD e telefone vêm grudados num único campo, sem
+// coluna separada (ex: "DDDTEL", "DDD_TEL", "Telefone_DDD") — headerHasToken
+// sozinho não dá conta: nesse caso o cabeçalho vira um token só que bate com
+// "ddd" por startsWith, a coluna é classificada só como DDD, e como não sobra
+// nenhuma coluna de telefone o pareamento fica vazio. Bug real em produção
+// (2026-08-26): coluna "dddtel" (DDD+celular grudados) fazia normalizeMailing
+// não achar nenhuma coluna de telefone/DDD e o envio inteiro falhava.
+function headerIsCombinedDddTel(header) {
+  const compact = normalizeHeader(header).replace(/[^\p{L}\p{N}]/gu, '');
+  return /ddd(tel|fone|cel)/.test(compact) || /(tel|fone|cel)ddd/.test(compact);
+}
+
 function isValidDdd(dddDigits) {
   if (dddDigits.length !== 2) return false;
   return VALID_DDDS.has(parseInt(dddDigits, 10));
@@ -124,9 +136,12 @@ function detectIdColumn(headers, explicitIdColumn) {
  * sem DDD pareado — o DDD pode estar embutido no próprio número.
  */
 function detectPhonePairs(headers, idColumn) {
-  const dddCols = headers.filter((h) => h !== idColumn && headerHasToken(h, 'ddd'));
-  const telCols = headers.filter((h) => {
-    if (h === idColumn) return false;
+  const relevant = headers.filter((h) => h !== idColumn);
+  const combinedCols = new Set(relevant.filter((h) => headerIsCombinedDddTel(h)));
+
+  const dddCols = relevant.filter((h) => !combinedCols.has(h) && headerHasToken(h, 'ddd'));
+  const telCols = relevant.filter((h) => {
+    if (combinedCols.has(h)) return true;
     if (headerHasToken(h, 'ddd')) return false;
     return headerHasToken(h, 'tel') || headerHasToken(h, 'cel') || headerHasToken(h, 'fone');
   });
@@ -142,6 +157,12 @@ function detectPhonePairs(headers, idColumn) {
   const pairs = [];
   let unpaired = 0;
   for (const telCol of telCols) {
+    // Campo com DDD+telefone grudados no mesmo cabeçalho: autocontido, não
+    // pareia com nenhuma coluna de DDD separada.
+    if (combinedCols.has(telCol)) {
+      pairs.push({ ddd: null, tel: telCol });
+      continue;
+    }
     const n = trailingNumber(telCol);
     if (n !== null && dddBySuffix.has(n)) {
       pairs.push({ ddd: dddBySuffix.get(n), tel: telCol });

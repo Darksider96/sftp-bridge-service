@@ -113,6 +113,44 @@ test('applyPhoneOverflowRule: um so telefone, nao ha excedente pra tratar', () =
   assert.deepEqual(applyPhoneOverflowRule(rows, 'exclude'), rows);
 });
 
+test('applyPhoneOverflowRule: colunas de emprestimo (Valor_Parcela/Parcelas_Paga/Parcelas_Restante) nunca somem, mesmo com action "exclude" (default sem layout_profile)', () => {
+  // Regressao end-to-end do bug real em producao (2026-08-25) visto pelo
+  // cliente: arquivo higienizado voltava com 3 colunas a menos
+  // (Valor_Parcela, Parcelas_Paga, Parcelas_Restante). A causa era
+  // detectPhonePairs (usado aqui dentro) casando essas colunas como telefone
+  // por substring solta ("par-CEL-a" contem "cel") -- applyPhoneOverflowRule
+  // roda com action='exclude' por padrao pra qualquer cliente sem
+  // layout_profile configurado, entao a coluna "detectada" como excedente
+  // era deletada de toda a base. O fix foi em detectPhonePairs (token, nao
+  // substring); este teste garante que a cadeia completa nao regride.
+  const rows = [{
+    CPF: '11111111111', Nome: 'FULANO', DDD: '17', Telefone: '991110001',
+    Contrato: 'CTR001', Prazo: '96', Valor_Parcela: '1331.76', Taxa: '2.03',
+    Parcelas_Paga: '11', Parcelas_Restante: '82', UF: 'MG',
+  }];
+  const result = applyPhoneOverflowRule(rows, 'exclude');
+  assert.deepEqual(Object.keys(result[0]), Object.keys(rows[0]));
+  assert.equal(result[0].Valor_Parcela, '1331.76');
+  assert.equal(result[0].Parcelas_Paga, '11');
+  assert.equal(result[0].Parcelas_Restante, '82');
+});
+
+test('applyPhoneOverflowRule: coluna cujo NOME bate com telefone mas o VALOR nao (falso positivo de deteccao por nome) nao e excluida', () => {
+  // Defesa em profundidade: detectPhonePairs decide so pelo NOME do
+  // cabecalho. Se uma coluna tiver nome parecido com telefone por acidente
+  // (ex: "Telefone_Ramal" guardando ramal de 4 digitos, nao telefone de
+  // verdade), o valor real nao "parece" telefone -- essa checagem extra por
+  // conteudo garante que ela fica na base em vez de ser apagada.
+  const rows = [
+    { CPF: '1', DDD: '11', Telefone: '999999999', Telefone_Ramal: '4521' },
+    { CPF: '2', DDD: '21', Telefone: '988888888', Telefone_Ramal: '3010' },
+  ];
+  const result = applyPhoneOverflowRule(rows, 'exclude');
+  assert.equal('Telefone_Ramal' in result[0], true);
+  assert.equal(result[0].Telefone_Ramal, '4521');
+  assert.equal(result[1].Telefone_Ramal, '3010');
+});
+
 test('mergePhoneColumns: funde DDD e Telefone numa coluna so, mantendo a posicao do Telefone', () => {
   const rows = [{ CPF: '1', DDD: '11', Telefone: '999999999', Nome: 'Foo' }];
   const result = mergePhoneColumns(rows);

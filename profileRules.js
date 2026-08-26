@@ -1,7 +1,31 @@
 // Regras fixas por cliente (layout_profile), aplicadas no arquivo final
 // pós-PROCV em checkRetorno.js. Nenhuma delas depende do layout do arquivo —
 // DDD/Telefone continuam 100% detectados por heurística em csvProcessor.js.
-const { detectPhonePairs } = require('./mailingNormalizer');
+const { detectPhonePairs, extractDddTelefone } = require('./mailingNormalizer');
+
+// Segunda checagem, por CONTEÚDO, antes de deixar applyPhoneOverflowRule
+// apagar uma coluna. detectPhonePairs decide só pelo NOME do cabeçalho —
+// bug real em produção (2026-08-25): colunas de parcela de empréstimo
+// ("Parcelas_Paga"/"Parcelas_Restante") bateram por acidente com "cel"
+// ("par-CEL-a") e a base do cliente voltou com 3 colunas a menos. O nome do
+// cabeçalho já foi corrigido (token, não substring), mas essa checagem é
+// defesa em profundidade: mesmo que um nome futuro engane a detecção de
+// novo, só apaga a coluna se o VALOR também parecer telefone de verdade.
+// As duas evidências (nome + valor) precisam concordar — o pior caso de
+// errar vira "coluna mantida" (inofensivo), nunca "coluna apagada".
+function pairLooksLikePhone(rows, pair) {
+  let nonEmpty = 0;
+  let valid = 0;
+  for (const row of rows) {
+    const rawTel = row[pair.tel] ?? '';
+    const rawDdd = pair.ddd ? row[pair.ddd] ?? '' : '';
+    if (!String(rawTel).replace(/\D/g, '') && !String(rawDdd).replace(/\D/g, '')) continue;
+    nonEmpty++;
+    if (extractDddTelefone(rawDdd, rawTel)) valid++;
+  }
+  if (nonEmpty === 0) return false;
+  return valid / nonEmpty >= 0.5;
+}
 
 // "Padrão Vanguard": o discador (Argus/Dazsoft) só reconhece/casa o cliente
 // do lado deles se o CABEÇALHO da coluna CODIGO vier em minúsculo — o VALOR
@@ -62,6 +86,7 @@ function applyPhoneOverflowRule(rows, action) {
   const pairs = detectPhonePairs(headers, '');
   const overflowCols = new Set();
   pairs.slice(1).forEach((p) => {
+    if (!pairLooksLikePhone(rows, p)) return;
     if (p.ddd) overflowCols.add(p.ddd);
     overflowCols.add(p.tel);
   });
