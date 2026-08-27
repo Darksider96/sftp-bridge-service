@@ -49,6 +49,21 @@ function applyVanguardPattern(rows, isVanguard) {
   });
 }
 
+// Detecta a coluna id/codigo/finaz por TOKEN INTEIRO, não substring solta —
+// bug real em produção (2026-08-27): coluna "idade" (idade do cliente, nada
+// a ver com identificador) batia com o regex antigo /id|codigo|finaz/i só
+// por conter "id" no meio da palavra ("ID-ade"), e a regra FINAZ substituía
+// a coluna de IDADE por CodigoFinaz/ProspeccaoId — o dado real de idade do
+// cliente sumia do arquivo final (reproduzido nos 4 arquivos de teste, tanto
+// no layout com ddd/tel separados quanto no "dddtel" combinado). "id" exige
+// token INTEIRO (curto demais — muita palavra real em português começa com
+// "id": idade, identidade, idoso...); "codigo"/"finaz" aceitam prefixo, já
+// que colisão acidental com palavra não relacionada é praticamente impossível.
+function looksLikeFinazIdColumn(header) {
+  const tokens = String(header).trim().toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return tokens.some((t) => t === 'id' || t.startsWith('codigo') || t.startsWith('código') || t.startsWith('finaz'));
+}
+
 // Regra FINAZ: substitui a coluna ID/CÓDIGO/FINAZ, na MESMA posição em que
 // ela estava, por duas colunas (CodigoFinaz, ProspeccaoId) com o mesmo valor.
 // Importante manter a ordem das colunas igual à do arquivo original — o
@@ -58,7 +73,7 @@ function applyVanguardPattern(rows, isVanguard) {
 function applyFinazRule(rows) {
   if (!rows.length) return rows;
   const headers = Object.keys(rows[0]);
-  const idColumn = headers.find((h) => /id|codigo|código|finaz/i.test(h)) || headers[0];
+  const idColumn = headers.find(looksLikeFinazIdColumn) || headers[0];
   return rows.map((row) => {
     const idValue = row[idColumn] ?? '';
     const result = {};

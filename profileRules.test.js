@@ -57,6 +57,23 @@ test('applyFinazRule: array vazio retorna vazio', () => {
   assert.deepEqual(applyFinazRule([]), []);
 });
 
+test('applyFinazRule: coluna "idade" nao e confundida com id/codigo (substring solta)', () => {
+  // Bug real em producao (2026-08-27), cliente FINAZ (ME7): "idade" contem
+  // "id" no meio da palavra e batia com o regex antigo /id|codigo|finaz/i --
+  // a regra substituia a coluna de IDADE DO CLIENTE por CodigoFinaz/
+  // ProspeccaoId (com o valor da idade dentro, rotulado errado), e o dado
+  // real de idade sumia do arquivo final. Sem coluna id/codigo/finaz de
+  // verdade nesse layout, o fallback correto e a primeira coluna (cpf).
+  const rows = [{ cpf: '11122233344', nome: 'FULANO', idade: '65', tel: '11999999999' }];
+  const result = applyFinazRule(rows);
+
+  assert.equal(result[0].idade, '65');
+  assert.equal(result[0].CodigoFinaz, '11122233344');
+  assert.equal(result[0].ProspeccaoId, '11122233344');
+  assert.equal('cpf' in result[0], false);
+  assert.deepEqual(Object.keys(result[0]), ['CodigoFinaz', 'ProspeccaoId', 'nome', 'idade', 'tel']);
+});
+
 test('Vanguard + FINAZ juntos: CodigoFinaz e ProspeccaoId saem identicos, valor original preservado', () => {
   // Regressao de bug real encontrado em producao (2026-08-12): rodar FINAZ
   // antes do Vanguard faz o Vanguard achar "CodigoFinaz" (contem "codigo" no
