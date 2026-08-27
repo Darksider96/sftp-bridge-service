@@ -127,6 +127,24 @@ test('applyPhoneOverflowRule: 2o/3o telefone esparso (maioria dos clientes so te
   assert.deepEqual(Object.keys(result[0]), ['CPF', 'ddd', 'tel']);
 });
 
+test('applyPhoneOverflowRule: 2o/3o telefone esparso, keep_empty tambem esvazia (nao so exclude)', () => {
+  // Mesmo cenario do teste acima, mas pro outro modo configuravel via
+  // layout_profile.phone_overflow_action: overflowCols e calculado uma vez
+  // so e reaproveitado pelos dois modos, entao o fix de pairLooksLikePhone
+  // vale pros dois -- este teste trava o keep_empty especificamente.
+  const rows = [
+    { CPF: '1', ddd: '34', tel: '984000001', ddd_1: '34', tel_1: '991000001', ddd_2: '31', tel_2: '999000001' },
+    { CPF: '2', ddd: '19', tel: '997000001', ddd_1: '0', tel_1: '0', ddd_2: '0', tel_2: '0' },
+  ];
+  const result = applyPhoneOverflowRule(rows, 'keep_empty');
+  assert.deepEqual(Object.keys(result[0]), ['CPF', 'ddd', 'tel', 'ddd_1', 'tel_1', 'ddd_2', 'tel_2']);
+  assert.equal(result[0].ddd_1, '');
+  assert.equal(result[0].tel_1, '');
+  assert.equal(result[0].ddd_2, '');
+  assert.equal(result[0].tel_2, '');
+  assert.equal(result[0].ddd, '34');
+});
+
 test('applyPhoneOverflowRule: um so telefone, nao ha excedente pra tratar', () => {
   const rows = [{ CPF: '1', DDD: '11', Telefone: '999999999' }];
   assert.deepEqual(applyPhoneOverflowRule(rows, 'exclude'), rows);
