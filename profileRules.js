@@ -10,21 +10,20 @@ const { detectPhonePairs, extractDddTelefone } = require('./mailingNormalizer');
 // ("par-CEL-a") e a base do cliente voltou com 3 colunas a menos. O nome do
 // cabeçalho já foi corrigido (token, não substring), mas essa checagem é
 // defesa em profundidade: mesmo que um nome futuro engane a detecção de
-// novo, só apaga a coluna se o VALOR também parecer telefone de verdade.
-// As duas evidências (nome + valor) precisam concordar — o pior caso de
-// errar vira "coluna mantida" (inofensivo), nunca "coluna apagada".
+// novo, só apaga a coluna se pelo menos ALGUM valor também parecer telefone
+// de verdade. Basta 1 linha válida (não maioria) — bug real em produção
+// (2026-08-27): 2º/3º telefone é legitimamente esparso (a maioria dos
+// clientes só tem 1 telefone preenchido), então exigir maioria válida
+// bloqueava a exclusão de colunas de telefone excedente de verdade ("DDD
+// 2"/"TEL 2" sobrevivendo no arquivo final quando deveriam ser removidas).
+// Só bloqueia a exclusão quando a coluna NUNCA se parece com telefone.
 function pairLooksLikePhone(rows, pair) {
-  let nonEmpty = 0;
-  let valid = 0;
   for (const row of rows) {
     const rawTel = row[pair.tel] ?? '';
     const rawDdd = pair.ddd ? row[pair.ddd] ?? '' : '';
-    if (!String(rawTel).replace(/\D/g, '') && !String(rawDdd).replace(/\D/g, '')) continue;
-    nonEmpty++;
-    if (extractDddTelefone(rawDdd, rawTel)) valid++;
+    if (extractDddTelefone(rawDdd, rawTel)) return true;
   }
-  if (nonEmpty === 0) return false;
-  return valid / nonEmpty >= 0.5;
+  return false;
 }
 
 // "Padrão Vanguard": o discador (Argus/Dazsoft) só reconhece/casa o cliente

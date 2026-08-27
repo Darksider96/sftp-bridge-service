@@ -108,6 +108,25 @@ test('applyPhoneOverflowRule: array vazio retorna vazio', () => {
   assert.deepEqual(applyPhoneOverflowRule([], 'exclude'), []);
 });
 
+test('applyPhoneOverflowRule: 2o/3o telefone esparso (maioria dos clientes so tem 1) ainda e excluido', () => {
+  // Regressao real em producao (2026-08-27), cliente ME7: cabecalho
+  // duplicado "ddd;tel;ddd;tel;ddd;tel" (Papa renomeia pra ddd/tel,
+  // ddd_1/tel_1, ddd_2/tel_2). A maioria dos clientes so tem o 1o telefone
+  // preenchido -- o 2o/3o fica com "0" ou vazio na maior parte das linhas.
+  // A checagem por CONTEUDO adicionada como defesa em profundidade (ver
+  // pairLooksLikePhone) exigia MAIORIA de linhas validas por coluna, o que
+  // e o normal pra telefone excedente esparso -- "DDD 2"/"TEL 2" ficava sem
+  // ser excluido, sobrevivendo no arquivo final quando deveria sumir.
+  const rows = [
+    { CPF: '1', ddd: '34', tel: '984000001', ddd_1: '34', tel_1: '991000001', ddd_2: '31', tel_2: '999000001' },
+    { CPF: '2', ddd: '19', tel: '997000001', ddd_1: '0', tel_1: '0', ddd_2: '0', tel_2: '0' },
+    { CPF: '3', ddd: '47', tel: '100000001', ddd_1: '47', tel_1: '100000002', ddd_2: '47', tel_2: '985000001' },
+    { CPF: '4', ddd: '21', tel: '900000001', ddd_1: '0', tel_1: '0', ddd_2: '0', tel_2: '0' },
+  ];
+  const result = applyPhoneOverflowRule(rows, 'exclude');
+  assert.deepEqual(Object.keys(result[0]), ['CPF', 'ddd', 'tel']);
+});
+
 test('applyPhoneOverflowRule: um so telefone, nao ha excedente pra tratar', () => {
   const rows = [{ CPF: '1', DDD: '11', Telefone: '999999999' }];
   assert.deepEqual(applyPhoneOverflowRule(rows, 'exclude'), rows);
