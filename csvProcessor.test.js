@@ -66,6 +66,25 @@ test('returnedData vazio retorna []', () => {
   assert.deepEqual(processCentrifugeReturn(orig, [], 'AGRESSIVA'), []);
 });
 
+test('retorno com coluna extra da higienizadora contendo "tel" no fim (ex: ServicoAnatel) nao e confundida com a coluna Telefone', () => {
+  // Risco real observado em produção: a higienizadora anexa colunas
+  // proprias ao retorno alem de Score -- em pelo menos um layout real,
+  // "ServicoAnatel" (termina em "...ana-TEL"). '.includes("tel")' bateria
+  // essa coluna tao bem quanto "Telefone" -- so nao quebrou ate hoje porque
+  // "Telefone" aparecia antes na ordem das colunas do retorno real. Aqui a
+  // coluna decoy vem ANTES de "Telefone" de proposito, pra provar que a
+  // deteccao (agora por token/prefixo, nao substring) nao depende de sorte
+  // de ordem -- um retorno futuro com colunas em outra ordem nao pode
+  // silenciosamente pegar o valor errado como telefone.
+  const orig = original([['11', '900000001', 'Cliente Aprovado']]);
+  const ret = [{ CPF: '00001234567890', DDD: '11', ServicoAnatel: '2', Telefone: '900000001', Score: '3' }];
+
+  const result = processCentrifugeReturn(orig, ret, 'AGRESSIVA');
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].Nome, 'Cliente Aprovado');
+});
+
 test('arquivo original sem cabeçalho (layout "finaz"): PROCV ainda casa os telefones', () => {
   // Antes da correção, originalData vinha de um Papa.parse cru com header:true — a primeira
   // linha virava cabeçalho por engano e o pareamento de colunas não achava nenhum telefone,

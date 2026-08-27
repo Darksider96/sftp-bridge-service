@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const Papa = require('papaparse');
-const { normalizeMailing, extractDddTelefone, detectIdColumn, detectPhonePairs, parseMailingCsv } = require('./mailingNormalizer');
+const { normalizeMailing, extractDddTelefone, detectIdColumn, detectPhonePairs, parseMailingCsv, headerHasToken } = require('./mailingNormalizer');
 
 test('extractDddTelefone: DDD e telefone em colunas separadas', () => {
   assert.deepEqual(extractDddTelefone('11', '999998888'), { ddd: '11', telefone: '999998888' });
@@ -43,6 +43,24 @@ test('detectIdColumn: prioriza CPF quando presente', () => {
 
 test('detectIdColumn: usa primeira coluna como fallback', () => {
   assert.equal(detectIdColumn(['Codigo Interno', 'Telefone']), 'Codigo Interno');
+});
+
+test('detectIdColumn: coluna "idade" nao e confundida com o candidato "id" (substring solta)', () => {
+  // Bug latente da mesma classe do que quebrou applyFinazRule (2026-08-27):
+  // "idade" comeca com "id" e o candidato 'id' de ID_COLUMN_CANDIDATES batia
+  // por startsWith. Sem nenhum candidato de verdade (cpf/cnpj/matricula/
+  // contrato/codigo/cliente) no arquivo, "idade" seria escolhida como
+  // identificador do cliente por engano. headerHasToken agora exige token
+  // EXATO pra "id" (ver EXACT_MATCH_ONLY_KEYWORDS), entao cai no fallback
+  // correto (primeira coluna).
+  assert.equal(detectIdColumn(['nome', 'idade', 'telefone']), 'nome');
+});
+
+test('headerHasToken: "id" exige token EXATO, nao serve so como prefixo', () => {
+  assert.equal(headerHasToken('idade', 'id'), false);
+  assert.equal(headerHasToken('identidade', 'id'), false);
+  assert.equal(headerHasToken('ID', 'id'), true);
+  assert.equal(headerHasToken('Id_Cliente', 'id'), true);
 });
 
 test('detectPhonePairs: pareia por sufixo numérico', () => {

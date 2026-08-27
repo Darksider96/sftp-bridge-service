@@ -56,6 +56,18 @@ function normalizeHeader(header) {
   return header.trim().toLowerCase();
 }
 
+// Palavras-chave curtas o bastante pra serem PREFIXO de uma palavra real do
+// domínio sem nenhuma relação com o que estamos detectando — startsWith por
+// token não basta pra elas, exigem o token INTEIRO igual. "id" é o caso
+// conhecido: "idade", "identidade", "idoso", "ideal" começam com "id" mas
+// não têm nada a ver com identificador de cliente (bug real em produção,
+// 2026-08-27: coluna "idade" batendo como coluna de id). Qualquer keyword
+// nova adicionada aos detectores abaixo (aqui ou em ID_COLUMN_CANDIDATES)
+// deve passar por essa mesma pergunta antes de ser usada com startsWith:
+// existe uma palavra comum de mailing/financeiro que começa com ela sem
+// ser o que estamos procurando? Se sim, entra neste set.
+const EXACT_MATCH_ONLY_KEYWORDS = new Set(['id']);
+
 // Compara por TOKEN (prefixo de uma palavra inteira do cabeçalho), não
 // substring solta em qualquer posição — bug real em produção (2026-08-25):
 // "Valor_Parcela"/"Parcelas_Paga"/"Parcelas_Restante" contêm "cel" no meio
@@ -63,9 +75,14 @@ function normalizeHeader(header) {
 // colunas (dados de parcela do empréstimo, nada a ver com telefone) serem
 // tratadas como telefone e apagadas do arquivo final. startsWith por token
 // ainda casa variações reais de cabeçalho ("Telefone1", "DDD 2", "Cel"),
-// só não casa mais keyword no MEIO de uma palavra não relacionada.
+// só não casa mais keyword no MEIO de uma palavra não relacionada. Pra
+// keywords em EXACT_MATCH_ONLY_KEYWORDS, nem prefixo vale — token tem que
+// ser exatamente a keyword.
 function headerHasToken(header, keyword) {
   const tokens = normalizeHeader(header).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (EXACT_MATCH_ONLY_KEYWORDS.has(keyword)) {
+    return tokens.some((t) => t === keyword);
+  }
   return tokens.some((t) => t.startsWith(keyword));
 }
 
@@ -391,4 +408,5 @@ module.exports = {
   detectIdColumn,
   detectPhonePairs,
   parseMailingCsv,
+  headerHasToken,
 };

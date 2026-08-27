@@ -1,7 +1,7 @@
 // Porta CommonJS de src/lib/centrifuge/csvProcessor.ts (processCentrifugeReturn).
 // Mesma lógica — mantenha as duas versões em sincronia se uma mudar.
 
-const { detectPhonePairs, extractDddTelefone } = require('./mailingNormalizer');
+const { detectPhonePairs, extractDddTelefone, headerHasToken } = require('./mailingNormalizer');
 
 /**
  * Motor de Retorno (PROCV Automático)
@@ -24,12 +24,17 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
   const validPhones = new Set();
 
   // Busca nomes de colunas na planilha retornada (case insensitive). O arquivo
-  // retornado é sempre o nosso próprio formato (CPF;DDD;Telefone + Score
-  // anexado pela higienizadora), então não precisa do motor de detecção.
+  // retornado é sempre o nosso próprio formato (CPF;DDD;Telefone), mas a
+  // higienizadora ANEXA colunas próprias (Score, e em pelo menos um layout
+  // real "ServicoAnatel") -- substring solta em '.includes("tel")' bate
+  // "ServicoAnatel" (termina em "...ana-TEL") tão bem quanto "Telefone"; só
+  // não quebrou até hoje por sorte de "Telefone" vir antes na ordem das
+  // colunas. headerHasToken (por token, prefixo) resolve: "servicoanatel" é
+  // um token só que não COMEÇA com "tel", já "telefone" começa.
   const retHeaders = Object.keys(returnedData[0]);
-  const scoreCol = retHeaders.find(h => h.toLowerCase().includes('score')) || 'Score';
+  const scoreCol = retHeaders.find(h => headerHasToken(h, 'score')) || 'Score';
   const retDddCol = retHeaders.find(h => h.toLowerCase() === 'ddd') || 'DDD';
-  const retTelCol = retHeaders.find(h => h.toLowerCase().includes('tel')) || 'Telefone';
+  const retTelCol = retHeaders.find(h => headerHasToken(h, 'tel')) || 'Telefone';
 
   for (const row of returnedData) {
     const score = parseInt(row[scoreCol] || '0', 10);

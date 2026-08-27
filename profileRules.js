@@ -1,7 +1,7 @@
 // Regras fixas por cliente (layout_profile), aplicadas no arquivo final
 // pós-PROCV em checkRetorno.js. Nenhuma delas depende do layout do arquivo —
 // DDD/Telefone continuam 100% detectados por heurística em csvProcessor.js.
-const { detectPhonePairs, extractDddTelefone } = require('./mailingNormalizer');
+const { detectPhonePairs, extractDddTelefone, headerHasToken } = require('./mailingNormalizer');
 
 // Segunda checagem, por CONTEÚDO, antes de deixar applyPhoneOverflowRule
 // apagar uma coluna. detectPhonePairs decide só pelo NOME do cabeçalho —
@@ -34,7 +34,7 @@ function pairLooksLikePhone(rows, pair) {
 function applyVanguardPattern(rows, isVanguard) {
   if (!isVanguard || !rows.length) return rows;
   const codigoKey = Object.keys(rows[0]).find(
-    (h) => h.toLowerCase().includes('codigo') || h.toLowerCase().includes('código')
+    (h) => headerHasToken(h, 'codigo') || headerHasToken(h, 'código')
   );
   if (!codigoKey) return rows;
   const lowerKey = codigoKey.toLowerCase();
@@ -49,19 +49,25 @@ function applyVanguardPattern(rows, isVanguard) {
   });
 }
 
-// Detecta a coluna id/codigo/finaz por TOKEN INTEIRO, não substring solta —
-// bug real em produção (2026-08-27): coluna "idade" (idade do cliente, nada
-// a ver com identificador) batia com o regex antigo /id|codigo|finaz/i só
-// por conter "id" no meio da palavra ("ID-ade"), e a regra FINAZ substituía
-// a coluna de IDADE por CodigoFinaz/ProspeccaoId — o dado real de idade do
-// cliente sumia do arquivo final (reproduzido nos 4 arquivos de teste, tanto
-// no layout com ddd/tel separados quanto no "dddtel" combinado). "id" exige
-// token INTEIRO (curto demais — muita palavra real em português começa com
-// "id": idade, identidade, idoso...); "codigo"/"finaz" aceitam prefixo, já
-// que colisão acidental com palavra não relacionada é praticamente impossível.
+// Detecta a coluna id/codigo/finaz reaproveitando headerHasToken (mesma
+// função usada em detectPhonePairs/detectIdColumn) — bug real em produção
+// (2026-08-27): coluna "idade" (idade do cliente, nada a ver com
+// identificador) batia com o regex antigo /id|codigo|finaz/i só por conter
+// "id" no meio da palavra ("ID-ade"), e a regra FINAZ substituía a coluna de
+// IDADE por CodigoFinaz/ProspeccaoId — o dado real de idade do cliente sumia
+// do arquivo final (reproduzido nos 4 arquivos de teste, tanto no layout com
+// ddd/tel separados quanto no "dddtel" combinado). headerHasToken já exige
+// token INTEIRO pra "id" (curto demais — muita palavra real em português
+// começa com "id": idade, identidade, idoso...) via EXACT_MATCH_ONLY_KEYWORDS
+// em mailingNormalizer.js; reaproveitar em vez de duplicar essa lógica aqui
+// garante que os dois lugares nunca saem de sincronia de novo.
 function looksLikeFinazIdColumn(header) {
-  const tokens = String(header).trim().toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  return tokens.some((t) => t === 'id' || t.startsWith('codigo') || t.startsWith('código') || t.startsWith('finaz'));
+  return (
+    headerHasToken(header, 'id') ||
+    headerHasToken(header, 'codigo') ||
+    headerHasToken(header, 'código') ||
+    headerHasToken(header, 'finaz')
+  );
 }
 
 // Regra FINAZ: substitui a coluna ID/CÓDIGO/FINAZ, na MESMA posição em que
