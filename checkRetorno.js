@@ -18,6 +18,17 @@ const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, origin
 const SFTP_RETORNO_DIR = process.env.SFTP_RETORNO_DIR || '/flag-contato/Retorno';
 const BUCKET = 'mailing-files';
 
+// Janela de segurança entre "recebemos um retorno" e "liberamos o arquivo
+// final pro ticket". Bug real em produção (2026-09): a higienizadora grava
+// um arquivo intermediário/incompleto e, ~1min15s depois, o arquivo completo
+// — e o cron também roda a cada ~1min, então às vezes pega o incompleto bem
+// no meio dessa janela. Se o ticket virasse "concluído" na hora, o admin
+// podia baixar e mandar pro discador o arquivo errado antes da correção
+// chegar. Por isso NENHUM ticket fica disponível pra download/envio antes
+// de passar esse tempo sem nenhum retorno maior aparecer. 3min é a folga
+// escolhida (bem mais que o ~1min15s observado).
+const CONFIRMATION_WINDOW_MS = 3 * 60 * 1000;
+
 let isChecking = false;
 
 /** Dispara uma varredura da pasta Retorno, ignorando se já houver uma em andamento. */
@@ -55,6 +66,10 @@ async function checkRetorno() {
       // Não move o arquivo — próximo ciclo tenta de novo (autorrecuperação)
     }
   }
+
+  // Depois de processar os arquivos novos, confirma quem já esperou a janela
+  // de segurança inteira sem nenhum retorno maior aparecer.
+  await confirmPendingReturns();
 }
 
 async function processReturnedFile(fileName) {
@@ -69,121 +84,259 @@ async function processReturnedFile(fileName) {
   }
 
   if (ticket.processed_file_url) {
+    // Ticket já finalizado (passou pela janela de confirmação) — qualquer
+    // retorno novo daqui em diante é tratado como possível duplicata ou
+    // correção tardia, não como o fluxo normal de primeira chegada.
     await handlePossibleDuplicateReturn(ticket, fileName, remotePath);
     return;
   }
 
-  await runProcv(ticket, fileName, remotePath);
+  await stageOrUpdatePendingReturn(ticket, fileName, remotePath);
+}
+
+/** Descobre o tamanho (bytes) de um objeto já salvo no Storage, sem baixar o conteúdo. */
+async function getStoredObjectSize(objectPath) {
+  const lastSlash = objectPath.lastIndexOf('/');
+  const dir = objectPath.slice(0, lastSlash);
+  const objectName = objectPath.slice(lastSlash + 1);
+  const { data: listing } = await supabaseAdmin.storage.from(BUCKET).list(dir, { search: objectName });
+  return listing?.[0]?.metadata?.size ?? null;
 }
 
 /**
- * Roda o PROCV completo pra um ticket a partir de um arquivo de retorno já
- * localizado no SFTP: baixa, cruza com o original, aplica as regras de
- * perfil, sobe o arquivo final e marca o ticket/job como concluído. Extraído
- * de processReturnedFile pra ser reaproveitado também por
- * handlePossibleDuplicateReturn quando um retorno MAIOR chega depois de um
- * ticket já concluído — mesma lógica, não duas cópias pra manter em sincronia.
+ * Ticket ainda não finalizado. Pode ser a primeira vez que ele recebe
+ * retorno, ou pode já ter um retorno anterior aguardando a janela de
+ * confirmação (status 'retorno_recebido') — nesse caso, um arquivo maior
+ * chegando agora SUBSTITUI o staged e reinicia a janela; um arquivo igual
+ * ou menor é ignorado (mantém o que já está esperando).
+ *
+ * Nunca roda o PROCV aqui — só arquiva o retorno bruto e marca o job como
+ * 'retorno_recebido'. Quem de fato calcula o arquivo final é
+ * confirmPendingReturns(), depois que a janela de segurança passar sem
+ * nada maior aparecer.
  */
-async function runProcv(ticket, fileName, remotePath) {
+async function stageOrUpdatePendingReturn(ticket, fileName, remotePath) {
+  let buffer;
   try {
-    const returnedBuffer = await download(remotePath);
-    const returnedCsv = returnedBuffer.toString('utf-8');
+    buffer = await download(remotePath);
+  } catch (err) {
+    console.error(`check-retorno: falha ao baixar "${fileName}" do ticket ${ticket.id}:`, err.message);
+    return;
+  }
+  const newSizeBytes = buffer.length;
+
+  const { data: pendingJob } = await supabaseAdmin
+    .from('centrifuga_jobs')
+    .select('id, arquivo_retornado_url')
+    .eq('ticket_id', ticket.id)
+    .eq('status', 'retorno_recebido')
+    .order('atualizado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (pendingJob) {
+    const storedSizeBytes = pendingJob.arquivo_retornado_url
+      ? await getStoredObjectSize(pendingJob.arquivo_retornado_url)
+      : null;
+
+    if (storedSizeBytes != null && newSizeBytes <= storedSizeBytes) {
+      console.log(`check-retorno: ticket ${ticket.id} já tem retorno aguardando confirmação (${storedSizeBytes} bytes) — novo arquivo (${newSizeBytes} bytes) não é maior, ignorado`);
+      await remove(remotePath);
+      return;
+    }
 
     const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
-    const { error: rawUploadError } = await supabaseAdmin.storage
+    const { error: uploadError } = await supabaseAdmin.storage
       .from(BUCKET)
-      .upload(rawUploadPath, returnedBuffer, { contentType: 'text/csv' });
-    if (rawUploadError) throw new Error(`Falha ao subir arquivo bruto de retorno: ${rawUploadError.message}`);
+      .upload(rawUploadPath, buffer, { contentType: 'text/csv' });
+    if (uploadError) {
+      console.error(`check-retorno: falha ao subir retorno atualizado do ticket ${ticket.id}:`, uploadError.message);
+      return;
+    }
 
     await supabaseAdmin
       .from('centrifuga_jobs')
-      .update({ arquivo_retornado_url: rawUploadPath })
-      .eq('ticket_id', ticket.id);
-
-    const { data: originalBlob, error: originalError } = await supabaseAdmin.storage
-      .from(BUCKET)
-      .download(ticket.original_file_url);
-    if (originalError || !originalBlob) {
-      throw new Error(`Falha ao baixar arquivo original: ${originalError?.message || 'sem dados'}`);
-    }
-    const originalCsv = Buffer.from(await originalBlob.arrayBuffer()).toString('utf-8');
-
-    // parseMailingCsv (não Papa.parse cru) porque o arquivo original do cliente pode não ter
-    // cabeçalho (ex: layout "finaz") — sem essa detecção a primeira linha vira cabeçalho por
-    // engano e o PROCV abaixo não acha nenhuma coluna de telefone pra casar.
-    const originalRows = parseMailingCsv(originalCsv);
-    const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
-
-    // Regras fixas do cliente (se tiver perfil vinculado) — DDD/Telefone
-    // continuam 100% detectados por heurística em processCentrifugeReturn
-    // (RF-003: só o primeiro telefone conta), o perfil só entra depois, nos
-    // ajustes que não dependem do layout do arquivo (FINAZ, telefones
-    // excedentes, padrão Vanguard).
-    const layoutProfile = await resolveClientLayoutProfile(ticket.client_id);
-
-    const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
-    let finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
-    // Vanguard PRECISA rodar antes do FINAZ: ambos localizam a coluna pelo nome
-    // conter "codigo", e o FINAZ cria uma coluna nova chamada CodigoFinaz — se
-    // o Vanguard rodasse depois, ele acharia CodigoFinaz em vez da coluna
-    // original e deixaria CodigoFinaz/ProspeccaoId com valores diferentes
-    // (quando deveriam ser idênticos). Testado em produção em 2026-08-12.
-    finalRows = applyVanguardPattern(finalRows, layoutProfile?.is_vanguard || false);
-    if (layoutProfile?.is_finaz) finalRows = applyFinazRule(finalRows);
-    finalRows = applyPhoneOverflowRule(finalRows, layoutProfile?.phone_overflow_action || 'exclude');
-    finalRows = mergePhoneColumns(finalRows);
-    // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
-    // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
-    // então o arquivo final precisa manter o mesmo delimitador.
-    const finalCsv = Papa.unparse(finalRows, { delimiter: ';' });
-
-    const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticket.id}.csv`;
-    const { error: processedUploadError } = await supabaseAdmin.storage
-      .from(BUCKET)
-      .upload(processedUploadPath, Buffer.from(finalCsv, 'utf-8'), { contentType: 'text/csv' });
-    if (processedUploadError) throw new Error(`Falha ao subir arquivo processado: ${processedUploadError.message}`);
-
-    // Mesma semântica de "primeiro status com este type" usada em getDefaultStatus() no frontend
-    // (src/lib/supabase-data.ts) — pode haver mais de uma linha com type='higienizado'.
-    const { data: higienizadoStatus, error: statusError } = await supabaseAdmin
-      .from('ticket_statuses')
-      .select('id')
-      .eq('type', 'higienizado')
-      .order('display_order', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (statusError || !higienizadoStatus) {
-      throw new Error(`Status 'higienizado' não encontrado: ${statusError?.message || 'nenhuma linha'}`);
-    }
-
-    const { error: ticketUpdateError } = await supabaseAdmin
-      .from('tickets')
-      .update({
-        processed_file_url: processedUploadPath,
-        // Nome do Mailing (não o nome do arquivo original que o cliente subiu) —
-        // é o que o cliente reconhece na tela, e o que precisa aparecer no
-        // download/envio à API.
-        processed_file_name: buildFinalFileName(ticket.mailing_name, filterLevel),
-        status_id: higienizadoStatus.id,
-      })
-      .eq('id', ticket.id);
-    if (ticketUpdateError) throw new Error(`Falha ao atualizar ticket: ${ticketUpdateError.message}`);
-
-    await supabaseAdmin
-      .from('centrifuga_jobs')
-      .update({ status: 'concluido' })
-      .eq('ticket_id', ticket.id);
+      .update({ arquivo_retornado_url: rawUploadPath, atualizado_em: new Date().toISOString() })
+      .eq('id', pendingJob.id);
 
     await remove(remotePath);
-    console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${finalRows.length} registros aprovados)`);
+    console.log(`check-retorno: ticket ${ticket.id} — retorno aguardando confirmação atualizado (novo: ${newSizeBytes} bytes, anterior: ${storedSizeBytes ?? 'desconhecido'} bytes), janela de ${CONFIRMATION_WINDOW_MS / 60000}min reiniciada`);
+    return;
+  }
+
+  // Primeira vez que esse ticket recebe retorno.
+  const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
+  const { error: uploadError } = await supabaseAdmin.storage
+    .from(BUCKET)
+    .upload(rawUploadPath, buffer, { contentType: 'text/csv' });
+  if (uploadError) {
+    console.error(`check-retorno: falha ao subir arquivo bruto de retorno do ticket ${ticket.id}:`, uploadError.message);
+    return;
+  }
+
+  const { error: insertError } = await supabaseAdmin.from('centrifuga_jobs').insert({
+    ticket_id: ticket.id,
+    status: 'retorno_recebido',
+    arquivo_retornado_url: rawUploadPath,
+  });
+  if (insertError) {
+    console.error(`check-retorno: falha ao registrar retorno recebido do ticket ${ticket.id}:`, insertError.message);
+    return;
+  }
+
+  await remove(remotePath);
+  console.log(`check-retorno: ticket ${ticket.id} — retorno recebido (${newSizeBytes} bytes), aguardando ${CONFIRMATION_WINDOW_MS / 60000}min de confirmação antes de finalizar`);
+}
+
+/**
+ * Varre os jobs 'retorno_recebido' cuja janela de confirmação já passou sem
+ * nenhum retorno maior aparecer, e finaliza cada um (roda o PROCV de
+ * verdade e libera o arquivo final pro ticket).
+ */
+async function confirmPendingReturns() {
+  const cutoff = new Date(Date.now() - CONFIRMATION_WINDOW_MS).toISOString();
+  const { data: readyJobs, error } = await supabaseAdmin
+    .from('centrifuga_jobs')
+    .select('id, ticket_id, arquivo_retornado_url')
+    .eq('status', 'retorno_recebido')
+    .lte('atualizado_em', cutoff);
+
+  if (error) {
+    console.error('check-retorno: falha ao buscar retornos aguardando confirmação:', error.message);
+    return;
+  }
+
+  for (const job of readyJobs || []) {
+    try {
+      await confirmReturn(job);
+    } catch (err) {
+      console.error(`check-retorno: erro confirmando retorno do ticket ${job.ticket_id}:`, err.message);
+    }
+  }
+}
+
+async function confirmReturn(job) {
+  const { data: ticket, error: ticketError } = await supabaseAdmin
+    .from('tickets')
+    .select(TICKET_COLUMNS)
+    .eq('id', job.ticket_id)
+    .maybeSingle();
+  if (ticketError || !ticket) {
+    throw new Error(`Ticket ${job.ticket_id} não encontrado pra confirmar retorno: ${ticketError?.message || 'sem dados'}`);
+  }
+
+  if (ticket.processed_file_url) {
+    // Já foi finalizado por outro caminho enquanto esperava (raro) — só limpa este job.
+    await supabaseAdmin.from('centrifuga_jobs').update({ status: 'concluido' }).eq('id', job.id);
+    return;
+  }
+
+  const { data: rawBlob, error: rawError } = await supabaseAdmin.storage.from(BUCKET).download(job.arquivo_retornado_url);
+  if (rawError || !rawBlob) {
+    throw new Error(`Falha ao baixar retorno bruto salvo: ${rawError?.message || 'sem dados'}`);
+  }
+  const returnedCsv = Buffer.from(await rawBlob.arrayBuffer()).toString('utf-8');
+
+  await finalizeReturnOrMarkFailed(ticket, returnedCsv, job.id);
+}
+
+/**
+ * O PROCV de verdade: cruza o retorno com o arquivo original, aplica as
+ * regras de perfil e libera o arquivo final pro ticket. Não mexe no arquivo
+ * bruto de retorno (isso já foi feito antes, em stageOrUpdatePendingReturn
+ * ou handlePossibleDuplicateReturn) — só transforma e finaliza.
+ */
+async function finalizeReturn(ticket, returnedCsv, jobId) {
+  const { data: originalBlob, error: originalError } = await supabaseAdmin.storage
+    .from(BUCKET)
+    .download(ticket.original_file_url);
+  if (originalError || !originalBlob) {
+    throw new Error(`Falha ao baixar arquivo original: ${originalError?.message || 'sem dados'}`);
+  }
+  const originalCsv = Buffer.from(await originalBlob.arrayBuffer()).toString('utf-8');
+
+  // parseMailingCsv (não Papa.parse cru) porque o arquivo original do cliente pode não ter
+  // cabeçalho (ex: layout "finaz") — sem essa detecção a primeira linha vira cabeçalho por
+  // engano e o PROCV abaixo não acha nenhuma coluna de telefone pra casar.
+  const originalRows = parseMailingCsv(originalCsv);
+  const returnedRows = Papa.parse(returnedCsv, { header: true, skipEmptyLines: true }).data;
+
+  // Regras fixas do cliente (se tiver perfil vinculado) — DDD/Telefone
+  // continuam 100% detectados por heurística em processCentrifugeReturn
+  // (RF-003: só o primeiro telefone conta), o perfil só entra depois, nos
+  // ajustes que não dependem do layout do arquivo (FINAZ, telefones
+  // excedentes, padrão Vanguard).
+  const layoutProfile = await resolveClientLayoutProfile(ticket.client_id);
+
+  const filterLevel = ticket.aggressiveness === 'moderada' ? 'MODERADA' : 'AGRESSIVA';
+  let finalRows = processCentrifugeReturn(originalRows, returnedRows, filterLevel);
+  // Vanguard PRECISA rodar antes do FINAZ: ambos localizam a coluna pelo nome
+  // conter "codigo", e o FINAZ cria uma coluna nova chamada CodigoFinaz — se
+  // o Vanguard rodasse depois, ele acharia CodigoFinaz em vez da coluna
+  // original e deixaria CodigoFinaz/ProspeccaoId com valores diferentes
+  // (quando deveriam ser idênticos). Testado em produção em 2026-08-12.
+  finalRows = applyVanguardPattern(finalRows, layoutProfile?.is_vanguard || false);
+  if (layoutProfile?.is_finaz) finalRows = applyFinazRule(finalRows);
+  finalRows = applyPhoneOverflowRule(finalRows, layoutProfile?.phone_overflow_action || 'exclude');
+  finalRows = mergePhoneColumns(finalRows);
+  // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
+  // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
+  // então o arquivo final precisa manter o mesmo delimitador.
+  const finalCsv = Papa.unparse(finalRows, { delimiter: ';' });
+
+  const processedUploadPath = `${ticket.client_id}/processed/${Date.now()}-${ticket.id}.csv`;
+  const { error: processedUploadError } = await supabaseAdmin.storage
+    .from(BUCKET)
+    .upload(processedUploadPath, Buffer.from(finalCsv, 'utf-8'), { contentType: 'text/csv' });
+  if (processedUploadError) throw new Error(`Falha ao subir arquivo processado: ${processedUploadError.message}`);
+
+  // Mesma semântica de "primeiro status com este type" usada em getDefaultStatus() no frontend
+  // (src/lib/supabase-data.ts) — pode haver mais de uma linha com type='higienizado'.
+  const { data: higienizadoStatus, error: statusError } = await supabaseAdmin
+    .from('ticket_statuses')
+    .select('id')
+    .eq('type', 'higienizado')
+    .order('display_order', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (statusError || !higienizadoStatus) {
+    throw new Error(`Status 'higienizado' não encontrado: ${statusError?.message || 'nenhuma linha'}`);
+  }
+
+  const { error: ticketUpdateError } = await supabaseAdmin
+    .from('tickets')
+    .update({
+      processed_file_url: processedUploadPath,
+      // Nome do Mailing (não o nome do arquivo original que o cliente subiu) —
+      // é o que o cliente reconhece na tela, e o que precisa aparecer no
+      // download/envio à API.
+      processed_file_name: buildFinalFileName(ticket.mailing_name, filterLevel),
+      status_id: higienizadoStatus.id,
+    })
+    .eq('id', ticket.id);
+  if (ticketUpdateError) throw new Error(`Falha ao atualizar ticket: ${ticketUpdateError.message}`);
+
+  // Por id do job específico (não por ticket_id) — não reescreve o status de
+  // outros jobs desse mesmo ticket (ciclos antigos, ou um job de
+  // reprocessamento tardio distinto).
+  await supabaseAdmin.from('centrifuga_jobs').update({ status: 'concluido' }).eq('id', jobId);
+
+  return finalRows.length;
+}
+
+/** Roda finalizeReturn e, se der erro, marca o job específico como 'falha' antes de propagar. */
+async function finalizeReturnOrMarkFailed(ticket, returnedCsv, jobId) {
+  try {
+    const count = await finalizeReturn(ticket, returnedCsv, jobId);
+    console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${count} registros aprovados)`);
   } catch (err) {
     try {
       await supabaseAdmin
         .from('centrifuga_jobs')
         .update({ status: 'falha', erro_mensagem: err.message })
-        .eq('ticket_id', ticket.id);
+        .eq('id', jobId);
     } catch (updateErr) {
-      console.error(`check-retorno: falha ao gravar status de falha do ticket ${ticket.id}:`, updateErr.message);
+      console.error(`check-retorno: falha ao gravar status de falha do job ${jobId}:`, updateErr.message);
     }
     throw err;
   }
@@ -199,46 +352,43 @@ function isSameReturnFile(newSizeBytes, storedSizeBytes) {
   return Math.abs(newSizeBytes - storedSizeBytes) <= 64;
 }
 
-// Ticket já tem processed_file_url — pode ser retorno duplicado de verdade
-// (o mesmo arquivo reenviado pela higienizadora) ou pode ser um retorno
-// DIFERENTE que chegou depois do primeiro (ex: a higienizadora manda o
-// resultado em lotes pra mailings grandes: um arquivo pequeno primeiro,
-// depois o completo). Descartar sempre como "duplicado" sem olhar o
-// conteúdo PERDE DADO REAL: bug real em produção (2026-09), ticket de
-// 12.232 telefones — o primeiro retorno trouxe só 2.129 resultados e foi
-// processado (1.109 aprovados); um segundo arquivo com o retorno completo
-// (~11.500 linhas, 6.202 aprovados) chegou depois e foi descartado como
-// "duplicado" em TODO ciclo do cron por mais de 24h, sem nenhum alerta — só
-// um console.log perdido nos logs do Render. Uma varredura nos arquivos
-// parados na pasta Retorno achou outros 6 tickets no mesmo estado, alguns
-// com até 14x mais dado no arquivo descartado do que no que foi processado
-// — em todos os casos observados, o padrão foi sempre o mesmo (arquivo
-// maior chegando depois == resultado mais completo, nunca um problema).
+// Ticket já FINALIZADO (já passou pela janela de confirmação) — pode ser
+// retorno duplicado de verdade (o mesmo arquivo reenviado pela
+// higienizadora) ou pode ser um retorno DIFERENTE que chegou bem depois
+// (mais raro agora que existe a janela de confirmação, mas ainda possível).
+// Descartar sempre como "duplicado" sem olhar o conteúdo PERDE DADO REAL:
+// bug real em produção (2026-09), ticket de 12.232 telefones — o primeiro
+// retorno trouxe só 2.129 resultados e foi processado (1.109 aprovados); um
+// segundo arquivo com o retorno completo (~11.500 linhas, 6.202 aprovados)
+// chegou depois e foi descartado como "duplicado" em TODO ciclo do cron por
+// mais de 24h, sem nenhum alerta. Uma varredura nos arquivos parados na
+// pasta Retorno achou outros 6 tickets no mesmo estado, alguns com até 14x
+// mais dado no arquivo descartado do que no que foi processado — em todos
+// os casos observados, o padrão foi sempre o mesmo (arquivo maior chegando
+// depois == resultado mais completo, nunca um problema).
 //
 // Compara o TAMANHO do novo arquivo com o que já está salvo
 // (arquivo_retornado_url do job mais recente do ticket):
 // - Tamanho igual (dentro da tolerância) -> duplicata de verdade,
 //   comportamento inalterado: ignora e mantém em Retorno.
-// - Novo arquivo MAIOR -> reprocessa automaticamente (runProcv), pelo
-//   padrão observado em produção. Isso SUBSTITUI o arquivo final do ticket
-//   (o cliente pode já ter agido sobre a lista menor) -- decisão consciente
-//   pra nunca mais perder dado aprovado pela higienizadora silenciosamente.
+// - Novo arquivo MAIOR -> reprocessa automaticamente, pelo padrão observado
+//   em produção. Isso SUBSTITUI o arquivo final do ticket (o cliente pode já
+//   ter agido sobre a lista menor) -- decisão consciente pra nunca mais
+//   perder dado aprovado pela higienizadora silenciosamente.
 // - Novo arquivo MENOR, ou tamanho anterior desconhecido -> não é seguro
 //   assumir que é uma versão "melhor"; não reprocessa sozinho. Grava um job
 //   NOVO com status='falha', o mesmo status que já aciona o alerta vermelho
 //   em CentrifugeControl.tsx (nenhuma mudança de frontend necessária). O
-//   arquivo fica intocado em Retorno pra revisão manual (mesmo caminho
-//   usado pra corrigir o ticket de 12k: zerar processed_file_url do ticket
-//   e deixar o próximo ciclo pegar o arquivo).
+//   arquivo fica intocado em Retorno pra revisão manual.
 async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
-  let newSizeBytes;
+  let buffer;
   try {
-    const buffer = await download(remotePath);
-    newSizeBytes = buffer.length;
+    buffer = await download(remotePath);
   } catch (err) {
     console.error(`check-retorno: falha ao baixar "${fileName}" pra comparar com o retorno já processado do ticket ${ticket.id}:`, err.message);
     return;
   }
+  const newSizeBytes = buffer.length;
 
   const { data: currentJob } = await supabaseAdmin
     .from('centrifuga_jobs')
@@ -248,14 +398,9 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
     .limit(1)
     .maybeSingle();
 
-  let storedSizeBytes = null;
-  if (currentJob?.arquivo_retornado_url) {
-    const lastSlash = currentJob.arquivo_retornado_url.lastIndexOf('/');
-    const dir = currentJob.arquivo_retornado_url.slice(0, lastSlash);
-    const objectName = currentJob.arquivo_retornado_url.slice(lastSlash + 1);
-    const { data: listing } = await supabaseAdmin.storage.from(BUCKET).list(dir, { search: objectName });
-    storedSizeBytes = listing?.[0]?.metadata?.size ?? null;
-  }
+  const storedSizeBytes = currentJob?.arquivo_retornado_url
+    ? await getStoredObjectSize(currentJob.arquivo_retornado_url)
+    : null;
 
   if (isSameReturnFile(newSizeBytes, storedSizeBytes)) {
     console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado (mesmo tamanho, ${newSizeBytes} bytes), mantido em Retorno`);
@@ -264,7 +409,28 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
 
   if (storedSizeBytes != null && newSizeBytes > storedSizeBytes) {
     console.warn(`check-retorno: ticket ${ticket.id} recebeu um retorno MAIOR que o já processado (novo: ${newSizeBytes} bytes, anterior: ${storedSizeBytes} bytes) — reprocessando automaticamente`);
-    await runProcv(ticket, fileName, remotePath);
+
+    const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from(BUCKET)
+      .upload(rawUploadPath, buffer, { contentType: 'text/csv' });
+    if (uploadError) {
+      console.error(`check-retorno: falha ao subir retorno maior do ticket ${ticket.id}:`, uploadError.message);
+      return;
+    }
+
+    const { data: newJob, error: insertError } = await supabaseAdmin
+      .from('centrifuga_jobs')
+      .insert({ ticket_id: ticket.id, status: 'retorno_recebido', arquivo_retornado_url: rawUploadPath })
+      .select('id')
+      .single();
+    if (insertError || !newJob) {
+      console.error(`check-retorno: falha ao registrar job de reprocessamento do ticket ${ticket.id}:`, insertError?.message);
+      return;
+    }
+
+    await remove(remotePath);
+    await finalizeReturnOrMarkFailed(ticket, buffer.toString('utf-8'), newJob.id);
     return;
   }
 
@@ -333,4 +499,4 @@ async function resolveTicket(fileName) {
   return matchTicketByFileName(fileName, pendingTickets || []);
 }
 
-module.exports = { triggerCheckRetorno, isSameReturnFile };
+module.exports = { triggerCheckRetorno, isSameReturnFile, CONFIRMATION_WINDOW_MS };
