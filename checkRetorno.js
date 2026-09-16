@@ -73,6 +73,18 @@ async function processReturnedFile(fileName) {
     return;
   }
 
+  await runProcv(ticket, fileName, remotePath);
+}
+
+/**
+ * Roda o PROCV completo pra um ticket a partir de um arquivo de retorno já
+ * localizado no SFTP: baixa, cruza com o original, aplica as regras de
+ * perfil, sobe o arquivo final e marca o ticket/job como concluído. Extraído
+ * de processReturnedFile pra ser reaproveitado também por
+ * handlePossibleDuplicateReturn quando um retorno MAIOR chega depois de um
+ * ticket já concluído — mesma lógica, não duas cópias pra manter em sincronia.
+ */
+async function runProcv(ticket, fileName, remotePath) {
   try {
     const returnedBuffer = await download(remotePath);
     const returnedCsv = returnedBuffer.toString('utf-8');
@@ -189,30 +201,35 @@ function isSameReturnFile(newSizeBytes, storedSizeBytes) {
 
 // Ticket já tem processed_file_url — pode ser retorno duplicado de verdade
 // (o mesmo arquivo reenviado pela higienizadora) ou pode ser um retorno
-// DIFERENTE/MAIOR que chegou depois do primeiro (ex: a higienizadora manda
-// o resultado em lotes pra mailings grandes). Descartar sempre como
-// "duplicado" sem olhar o conteúdo PERDE DADO REAL: bug real em produção
-// (2026-09), ticket de 12.232 telefones — o primeiro retorno trouxe só
-// 2.129 resultados e foi processado (1.109 aprovados); um segundo arquivo
-// com o retorno completo (~11.500 linhas, 6.202 aprovados) chegou depois e
-// foi descartado como "duplicado" em TODO ciclo do cron por mais de 24h,
-// sem nenhum alerta — só um console.log perdido nos logs do Render. Uma
-// varredura nos arquivos parados na pasta Retorno achou outros 6 tickets no
-// mesmo estado, alguns com até 14x mais dado no arquivo descartado do que
-// no que foi processado.
+// DIFERENTE que chegou depois do primeiro (ex: a higienizadora manda o
+// resultado em lotes pra mailings grandes: um arquivo pequeno primeiro,
+// depois o completo). Descartar sempre como "duplicado" sem olhar o
+// conteúdo PERDE DADO REAL: bug real em produção (2026-09), ticket de
+// 12.232 telefones — o primeiro retorno trouxe só 2.129 resultados e foi
+// processado (1.109 aprovados); um segundo arquivo com o retorno completo
+// (~11.500 linhas, 6.202 aprovados) chegou depois e foi descartado como
+// "duplicado" em TODO ciclo do cron por mais de 24h, sem nenhum alerta — só
+// um console.log perdido nos logs do Render. Uma varredura nos arquivos
+// parados na pasta Retorno achou outros 6 tickets no mesmo estado, alguns
+// com até 14x mais dado no arquivo descartado do que no que foi processado
+// — em todos os casos observados, o padrão foi sempre o mesmo (arquivo
+// maior chegando depois == resultado mais completo, nunca um problema).
 //
-// Aqui compara o TAMANHO do novo arquivo com o que já está salvo
-// (arquivo_retornado_url do job mais recente do ticket): se bater, é
-// duplicata de verdade — comportamento inalterado, ignora e mantém em
-// Retorno. Se divergir (ou não der pra confirmar o tamanho já salvo),
-// NÃO reprocessa sozinho — decisão de negócio, o cliente pode já ter agido
-// sobre o resultado anterior. Em vez disso grava um job NOVO com
-// status='falha', que é o mesmo status que já aciona o alerta vermelho em
-// CentrifugeControl.tsx (nenhuma mudança de frontend necessária), deixando
-// claro que existe retorno adicional esperando revisão manual. O arquivo em
-// si não é tocado — fica em Retorno pra ser reprocessado manualmente quando
-// alguém decidir (mesmo caminho usado pra corrigir o ticket de 12k: zerar
-// processed_file_url do ticket e deixar o próximo ciclo pegar o arquivo).
+// Compara o TAMANHO do novo arquivo com o que já está salvo
+// (arquivo_retornado_url do job mais recente do ticket):
+// - Tamanho igual (dentro da tolerância) -> duplicata de verdade,
+//   comportamento inalterado: ignora e mantém em Retorno.
+// - Novo arquivo MAIOR -> reprocessa automaticamente (runProcv), pelo
+//   padrão observado em produção. Isso SUBSTITUI o arquivo final do ticket
+//   (o cliente pode já ter agido sobre a lista menor) -- decisão consciente
+//   pra nunca mais perder dado aprovado pela higienizadora silenciosamente.
+// - Novo arquivo MENOR, ou tamanho anterior desconhecido -> não é seguro
+//   assumir que é uma versão "melhor"; não reprocessa sozinho. Grava um job
+//   NOVO com status='falha', o mesmo status que já aciona o alerta vermelho
+//   em CentrifugeControl.tsx (nenhuma mudança de frontend necessária). O
+//   arquivo fica intocado em Retorno pra revisão manual (mesmo caminho
+//   usado pra corrigir o ticket de 12k: zerar processed_file_url do ticket
+//   e deixar o próximo ciclo pegar o arquivo).
 async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
   let newSizeBytes;
   try {
@@ -245,7 +262,13 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
     return;
   }
 
-  const mensagem = `Retorno adicional recebido em "${fileName}" (${newSizeBytes} bytes) diverge do já processado (${storedSizeBytes ?? 'tamanho desconhecido'} bytes). Arquivo mantido em Retorno — pode conter mais contatos aprovados que ainda não estão no arquivo final. Revisar manualmente antes de reprocessar.`;
+  if (storedSizeBytes != null && newSizeBytes > storedSizeBytes) {
+    console.warn(`check-retorno: ticket ${ticket.id} recebeu um retorno MAIOR que o já processado (novo: ${newSizeBytes} bytes, anterior: ${storedSizeBytes} bytes) — reprocessando automaticamente`);
+    await runProcv(ticket, fileName, remotePath);
+    return;
+  }
+
+  const mensagem = `Retorno adicional recebido em "${fileName}" (${newSizeBytes} bytes) diverge do já processado (${storedSizeBytes ?? 'tamanho desconhecido'} bytes) e não é maior, então não foi reprocessado automaticamente. Arquivo mantido em Retorno — revisar manualmente.`;
   console.warn(`check-retorno: ticket ${ticket.id} — ${mensagem}`);
   try {
     await supabaseAdmin.from('centrifuga_jobs').insert({
