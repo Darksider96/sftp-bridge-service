@@ -69,8 +69,7 @@ async function processReturnedFile(fileName) {
   }
 
   if (ticket.processed_file_url) {
-    // Idem: fica em Retorno, sem mover/apagar, para revisão manual.
-    console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado, mantido em Retorno`);
+    await handlePossibleDuplicateReturn(ticket, fileName, remotePath);
     return;
   }
 
@@ -178,6 +177,87 @@ async function processReturnedFile(fileName) {
   }
 }
 
+// Pura e testável: decide se dois tamanhos de arquivo (bytes) são "o mesmo
+// arquivo reenviado" (duplicata segura de ignorar) ou divergem o bastante
+// pra merecer revisão manual antes de qualquer decisão automática. Tolerância
+// pequena e fixa (não percentual) — quanto mais rígida, menos risco de um
+// retorno genuinamente diferente escapar classificado como "duplicata".
+function isSameReturnFile(newSizeBytes, storedSizeBytes) {
+  if (storedSizeBytes == null) return false;
+  return Math.abs(newSizeBytes - storedSizeBytes) <= 64;
+}
+
+// Ticket já tem processed_file_url — pode ser retorno duplicado de verdade
+// (o mesmo arquivo reenviado pela higienizadora) ou pode ser um retorno
+// DIFERENTE/MAIOR que chegou depois do primeiro (ex: a higienizadora manda
+// o resultado em lotes pra mailings grandes). Descartar sempre como
+// "duplicado" sem olhar o conteúdo PERDE DADO REAL: bug real em produção
+// (2026-09), ticket de 12.232 telefones — o primeiro retorno trouxe só
+// 2.129 resultados e foi processado (1.109 aprovados); um segundo arquivo
+// com o retorno completo (~11.500 linhas, 6.202 aprovados) chegou depois e
+// foi descartado como "duplicado" em TODO ciclo do cron por mais de 24h,
+// sem nenhum alerta — só um console.log perdido nos logs do Render. Uma
+// varredura nos arquivos parados na pasta Retorno achou outros 6 tickets no
+// mesmo estado, alguns com até 14x mais dado no arquivo descartado do que
+// no que foi processado.
+//
+// Aqui compara o TAMANHO do novo arquivo com o que já está salvo
+// (arquivo_retornado_url do job mais recente do ticket): se bater, é
+// duplicata de verdade — comportamento inalterado, ignora e mantém em
+// Retorno. Se divergir (ou não der pra confirmar o tamanho já salvo),
+// NÃO reprocessa sozinho — decisão de negócio, o cliente pode já ter agido
+// sobre o resultado anterior. Em vez disso grava um job NOVO com
+// status='falha', que é o mesmo status que já aciona o alerta vermelho em
+// CentrifugeControl.tsx (nenhuma mudança de frontend necessária), deixando
+// claro que existe retorno adicional esperando revisão manual. O arquivo em
+// si não é tocado — fica em Retorno pra ser reprocessado manualmente quando
+// alguém decidir (mesmo caminho usado pra corrigir o ticket de 12k: zerar
+// processed_file_url do ticket e deixar o próximo ciclo pegar o arquivo).
+async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
+  let newSizeBytes;
+  try {
+    const buffer = await download(remotePath);
+    newSizeBytes = buffer.length;
+  } catch (err) {
+    console.error(`check-retorno: falha ao baixar "${fileName}" pra comparar com o retorno já processado do ticket ${ticket.id}:`, err.message);
+    return;
+  }
+
+  const { data: currentJob } = await supabaseAdmin
+    .from('centrifuga_jobs')
+    .select('arquivo_retornado_url')
+    .eq('ticket_id', ticket.id)
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let storedSizeBytes = null;
+  if (currentJob?.arquivo_retornado_url) {
+    const lastSlash = currentJob.arquivo_retornado_url.lastIndexOf('/');
+    const dir = currentJob.arquivo_retornado_url.slice(0, lastSlash);
+    const objectName = currentJob.arquivo_retornado_url.slice(lastSlash + 1);
+    const { data: listing } = await supabaseAdmin.storage.from(BUCKET).list(dir, { search: objectName });
+    storedSizeBytes = listing?.[0]?.metadata?.size ?? null;
+  }
+
+  if (isSameReturnFile(newSizeBytes, storedSizeBytes)) {
+    console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado (mesmo tamanho, ${newSizeBytes} bytes), mantido em Retorno`);
+    return;
+  }
+
+  const mensagem = `Retorno adicional recebido em "${fileName}" (${newSizeBytes} bytes) diverge do já processado (${storedSizeBytes ?? 'tamanho desconhecido'} bytes). Arquivo mantido em Retorno — pode conter mais contatos aprovados que ainda não estão no arquivo final. Revisar manualmente antes de reprocessar.`;
+  console.warn(`check-retorno: ticket ${ticket.id} — ${mensagem}`);
+  try {
+    await supabaseAdmin.from('centrifuga_jobs').insert({
+      ticket_id: ticket.id,
+      status: 'falha',
+      erro_mensagem: mensagem,
+    });
+  } catch (err) {
+    console.error(`check-retorno: falha ao gravar alerta de retorno divergente pro ticket ${ticket.id}:`, err.message);
+  }
+}
+
 /** Busca o layout_profile vinculado ao cliente do ticket, se houver algum. */
 async function resolveClientLayoutProfile(clientId) {
   const { data: clientRow, error: clientError } = await supabaseAdmin
@@ -230,4 +310,4 @@ async function resolveTicket(fileName) {
   return matchTicketByFileName(fileName, pendingTickets || []);
 }
 
-module.exports = { triggerCheckRetorno };
+module.exports = { triggerCheckRetorno, isSameReturnFile };
