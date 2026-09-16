@@ -139,7 +139,7 @@ async function stageOrUpdatePendingReturn(ticket, fileName, remotePath) {
       ? await getStoredObjectSize(pendingJob.arquivo_retornado_url)
       : null;
 
-    if (storedSizeBytes != null && newSizeBytes <= storedSizeBytes) {
+    if (!shouldReplaceStagedReturn(newSizeBytes, storedSizeBytes)) {
       console.log(`check-retorno: ticket ${ticket.id} já tem retorno aguardando confirmação (${storedSizeBytes} bytes) — novo arquivo (${newSizeBytes} bytes) não é maior, ignorado`);
       await remove(remotePath);
       return;
@@ -194,7 +194,7 @@ async function stageOrUpdatePendingReturn(ticket, fileName, remotePath) {
  * verdade e libera o arquivo final pro ticket).
  */
 async function confirmPendingReturns() {
-  const cutoff = new Date(Date.now() - CONFIRMATION_WINDOW_MS).toISOString();
+  const cutoff = computeConfirmationCutoff();
   const { data: readyJobs, error } = await supabaseAdmin
     .from('centrifuga_jobs')
     .select('id, ticket_id, arquivo_retornado_url')
@@ -352,6 +352,36 @@ function isSameReturnFile(newSizeBytes, storedSizeBytes) {
   return Math.abs(newSizeBytes - storedSizeBytes) <= 64;
 }
 
+// Pura e testável: decide se um retorno chegando durante a janela de
+// confirmação (ticket AINDA não finalizado) deve substituir o que já está
+// staged. Diferente de classifyDivergentReturn (usada pós-finalização):
+// aqui não há nada exposto pro ticket ainda, então não ter certeza do
+// tamanho anterior não é motivo pra cautela — substitui por padrão (a pior
+// consequência de errar é reprocessar de novo daqui a pouco, não expor
+// dado errado).
+function shouldReplaceStagedReturn(newSizeBytes, storedSizeBytes) {
+  if (storedSizeBytes == null) return true;
+  return newSizeBytes > storedSizeBytes;
+}
+
+// Pura e testável: calcula o timestamp de corte (ISO) usado pra achar jobs
+// 'retorno_recebido' cuja janela de confirmação já passou. Extraída pra
+// poder testar a aritmética de tempo isoladamente, com um `now` fixo em vez
+// de depender do relógio real.
+function computeConfirmationCutoff(now = new Date()) {
+  return new Date(now.getTime() - CONFIRMATION_WINDOW_MS).toISOString();
+}
+
+// Pura e testável: classifica um retorno divergente chegando pra um ticket
+// JÁ FINALIZADO em uma de três ações — ver handlePossibleDuplicateReturn
+// pra o raciocínio completo (por que "maior" é seguro reprocessar sozinho e
+// "menor/desconhecido" não é).
+function classifyDivergentReturn(newSizeBytes, storedSizeBytes) {
+  if (isSameReturnFile(newSizeBytes, storedSizeBytes)) return 'duplicate';
+  if (storedSizeBytes != null && newSizeBytes > storedSizeBytes) return 'reprocess';
+  return 'alert';
+}
+
 // Ticket já FINALIZADO (já passou pela janela de confirmação) — pode ser
 // retorno duplicado de verdade (o mesmo arquivo reenviado pela
 // higienizadora) ou pode ser um retorno DIFERENTE que chegou bem depois
@@ -402,12 +432,14 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
     ? await getStoredObjectSize(currentJob.arquivo_retornado_url)
     : null;
 
-  if (isSameReturnFile(newSizeBytes, storedSizeBytes)) {
+  const decision = classifyDivergentReturn(newSizeBytes, storedSizeBytes);
+
+  if (decision === 'duplicate') {
     console.log(`check-retorno: ticket ${ticket.id} já tem processed_file_url — retorno duplicado (mesmo tamanho, ${newSizeBytes} bytes), mantido em Retorno`);
     return;
   }
 
-  if (storedSizeBytes != null && newSizeBytes > storedSizeBytes) {
+  if (decision === 'reprocess') {
     console.warn(`check-retorno: ticket ${ticket.id} recebeu um retorno MAIOR que o já processado (novo: ${newSizeBytes} bytes, anterior: ${storedSizeBytes} bytes) — reprocessando automaticamente`);
 
     const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
@@ -434,6 +466,7 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
     return;
   }
 
+  // decision === 'alert'
   const mensagem = `Retorno adicional recebido em "${fileName}" (${newSizeBytes} bytes) diverge do já processado (${storedSizeBytes ?? 'tamanho desconhecido'} bytes) e não é maior, então não foi reprocessado automaticamente. Arquivo mantido em Retorno — revisar manualmente.`;
   console.warn(`check-retorno: ticket ${ticket.id} — ${mensagem}`);
   try {
@@ -499,4 +532,11 @@ async function resolveTicket(fileName) {
   return matchTicketByFileName(fileName, pendingTickets || []);
 }
 
-module.exports = { triggerCheckRetorno, isSameReturnFile, CONFIRMATION_WINDOW_MS };
+module.exports = {
+  triggerCheckRetorno,
+  isSameReturnFile,
+  shouldReplaceStagedReturn,
+  computeConfirmationCutoff,
+  classifyDivergentReturn,
+  CONFIRMATION_WINDOW_MS,
+};
