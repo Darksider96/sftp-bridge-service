@@ -12,7 +12,10 @@ const {
   shouldReplaceStagedReturn,
   computeConfirmationCutoff,
   classifyDivergentReturn,
+  classifyApprovalRate,
   CONFIRMATION_WINDOW_MS,
+  MIN_APPROVAL_RATE,
+  MAX_PERCENTUAL_RETRIES,
 } = require('./checkRetorno');
 
 test('isSameReturnFile: tamanhos identicos sao a mesma duplicata', () => {
@@ -98,4 +101,38 @@ test('classifyDivergentReturn: tamanho anterior desconhecido -> alert (cautela, 
   // e o cliente pode ja ter agido sobre o resultado anterior, entao "nao sei
   // se e melhor" tem que ser tratado com cautela, nao aceito de graca.
   assert.equal(classifyDivergentReturn(1000, null), 'alert');
+});
+
+test('classifyApprovalRate: percentual normal (dentro de 60-30%) -> finalize', () => {
+  // Caso real: ticket de 12k, 6270 aprovados de 12232 enviados (~51%).
+  assert.equal(classifyApprovalRate(6270, 12232, 0), 'finalize');
+});
+
+test('classifyApprovalRate: exatamente no limite de 30% -> finalize (>=, nao >)', () => {
+  assert.equal(MIN_APPROVAL_RATE, 0.30);
+  assert.equal(classifyApprovalRate(30, 100, 0), 'finalize');
+});
+
+test('classifyApprovalRate: logo abaixo do limite, ainda ha tentativas -> retry', () => {
+  assert.equal(classifyApprovalRate(29, 100, 0), 'retry');
+});
+
+test('classifyApprovalRate: percentual baixo, tentativas ainda nao esgotadas -> retry', () => {
+  assert.equal(MAX_PERCENTUAL_RETRIES, 3);
+  assert.equal(classifyApprovalRate(10, 100, 0), 'retry');
+  assert.equal(classifyApprovalRate(10, 100, 1), 'retry');
+  assert.equal(classifyApprovalRate(10, 100, 2), 'retry');
+});
+
+test('classifyApprovalRate: percentual baixo e tentativas esgotadas -> finalize_with_warning', () => {
+  // Caso real: retorno incompleto do ticket de 12k -- so 1109 de 12232
+  // enviados (~9%) no primeiro arquivo. Depois de 3 tentativas sem melhorar,
+  // libera mesmo assim (mas com aviso), nao trava o cliente pra sempre.
+  assert.equal(classifyApprovalRate(1109, 12232, 3), 'finalize_with_warning');
+});
+
+test('classifyApprovalRate: sem telefones_enviados conhecido, finaliza sem checar (ticket antigo)', () => {
+  assert.equal(classifyApprovalRate(5, 0, 0), 'finalize');
+  assert.equal(classifyApprovalRate(5, null, 0), 'finalize');
+  assert.equal(classifyApprovalRate(5, undefined, 0), 'finalize');
 });

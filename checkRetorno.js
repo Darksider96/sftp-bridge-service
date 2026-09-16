@@ -13,7 +13,7 @@ const {
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
 
-const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url';
+const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url, telefones_enviados';
 
 const SFTP_RETORNO_DIR = process.env.SFTP_RETORNO_DIR || '/flag-contato/Retorno';
 const BUCKET = 'mailing-files';
@@ -28,6 +28,19 @@ const BUCKET = 'mailing-files';
 // de passar esse tempo sem nenhum retorno maior aparecer. 3min é a folga
 // escolhida (bem mais que o ~1min15s observado).
 const CONFIRMATION_WINDOW_MS = 3 * 60 * 1000;
+
+// Regra do Henrique (Venditore, 2026-09-16): o normal é sobrar 60-30% da base
+// enviada depois da higienização — menos que 30% é suspeito (provável
+// retorno incompleto da higienizadora, não um resultado real; a janela de
+// confirmação acima só pega o caso de um SEGUNDO arquivo maior chegar depois
+// — se a higienizadora mandar só UM arquivo incompleto e nunca mais nada,
+// nada detecta isso sem essa checagem de percentual). Dá até
+// MAX_PERCENTUAL_RETRIES chances (reagendando a cada CONFIRMATION_WINDOW_MS)
+// antes de desistir e liberar mesmo assim — às vezes a base realmente tem
+// qualidade baixa, e bloquear o ticket pra sempre também seria um erro (o
+// cliente nunca receberia nada).
+const MIN_APPROVAL_RATE = 0.30;
+const MAX_PERCENTUAL_RETRIES = 3;
 
 let isChecking = false;
 
@@ -197,7 +210,7 @@ async function confirmPendingReturns() {
   const cutoff = computeConfirmationCutoff();
   const { data: readyJobs, error } = await supabaseAdmin
     .from('centrifuga_jobs')
-    .select('id, ticket_id, arquivo_retornado_url')
+    .select('id, ticket_id, arquivo_retornado_url, tentativas_percentual')
     .eq('status', 'retorno_recebido')
     .lte('atualizado_em', cutoff);
 
@@ -231,22 +244,65 @@ async function confirmReturn(job) {
     return;
   }
 
-  const { data: rawBlob, error: rawError } = await supabaseAdmin.storage.from(BUCKET).download(job.arquivo_retornado_url);
-  if (rawError || !rawBlob) {
-    throw new Error(`Falha ao baixar retorno bruto salvo: ${rawError?.message || 'sem dados'}`);
-  }
-  const returnedCsv = Buffer.from(await rawBlob.arrayBuffer()).toString('utf-8');
+  try {
+    const { data: rawBlob, error: rawError } = await supabaseAdmin.storage.from(BUCKET).download(job.arquivo_retornado_url);
+    if (rawError || !rawBlob) {
+      throw new Error(`Falha ao baixar retorno bruto salvo: ${rawError?.message || 'sem dados'}`);
+    }
+    const returnedCsv = Buffer.from(await rawBlob.arrayBuffer()).toString('utf-8');
 
-  await finalizeReturnOrMarkFailed(ticket, returnedCsv, job.id);
+    const { finalRows, filterLevel } = await buildFinalRows(ticket, returnedCsv);
+    const decision = classifyApprovalRate(finalRows.length, ticket.telefones_enviados, job.tentativas_percentual);
+    const rateLabel = ticket.telefones_enviados
+      ? `${finalRows.length}/${ticket.telefones_enviados} = ${((finalRows.length / ticket.telefones_enviados) * 100).toFixed(1)}%`
+      : `${finalRows.length} aprovados (telefones_enviados desconhecido, sem base pra calcular percentual)`;
+
+    if (decision === 'retry') {
+      console.warn(`check-retorno: ticket ${ticket.id} com percentual de aprovação baixo (${rateLabel}, mínimo ${MIN_APPROVAL_RATE * 100}%) — tentativa ${job.tentativas_percentual + 1}/${MAX_PERCENTUAL_RETRIES}, reagendando confirmação em ${CONFIRMATION_WINDOW_MS / 60000}min`);
+      await supabaseAdmin
+        .from('centrifuga_jobs')
+        .update({ tentativas_percentual: job.tentativas_percentual + 1, atualizado_em: new Date().toISOString() })
+        .eq('id', job.id);
+      return;
+    }
+
+    // Aviso interno gravado no PRÓPRIO job que está sendo finalizado (não um
+    // job novo em separado) — um job 'falha' mais recente faria
+    // getCentrifugeJob() (mais recente por criado_em) devolver esse job pro
+    // frontend, e CentrifugeControl.tsx cairia no branch de "nada foi feito
+    // ainda", reexibindo o botão de iniciar higienização (risco de reenvio
+    // duplicado) mesmo com o ticket já corretamente finalizado. Guardando o
+    // aviso em erro_mensagem no MESMO job (status continua 'concluido'),
+    // fica tudo numa linha só: concluído E com aviso.
+    const percentualWarning = decision === 'finalize_with_warning'
+      ? `Percentual de aprovação baixo (${rateLabel}, mínimo esperado ${MIN_APPROVAL_RATE * 100}%) após ${MAX_PERCENTUAL_RETRIES} tentativas de confirmação. Pode ser retorno incompleto da higienizadora — revisar manualmente.`
+      : null;
+    if (percentualWarning) {
+      console.warn(`check-retorno: ticket ${ticket.id} — ${percentualWarning}`);
+    }
+
+    await publishFinalResult(ticket, finalRows, filterLevel, job.id, percentualWarning);
+    console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${finalRows.length} registros aprovados)`);
+  } catch (err) {
+    try {
+      await supabaseAdmin
+        .from('centrifuga_jobs')
+        .update({ status: 'falha', erro_mensagem: err.message })
+        .eq('id', job.id);
+    } catch (updateErr) {
+      console.error(`check-retorno: falha ao gravar status de falha do job ${job.id}:`, updateErr.message);
+    }
+    throw err;
+  }
 }
 
 /**
- * O PROCV de verdade: cruza o retorno com o arquivo original, aplica as
- * regras de perfil e libera o arquivo final pro ticket. Não mexe no arquivo
- * bruto de retorno (isso já foi feito antes, em stageOrUpdatePendingReturn
- * ou handlePossibleDuplicateReturn) — só transforma e finaliza.
+ * Cruza o retorno com o arquivo original e aplica as regras de perfil,
+ * retornando as linhas finais SEM publicar nada ainda — separado de
+ * publishFinalResult pra dar tempo de checar o percentual de aprovação
+ * (classifyApprovalRate) antes de decidir se finaliza ou reagenda.
  */
-async function finalizeReturn(ticket, returnedCsv, jobId) {
+async function buildFinalRows(ticket, returnedCsv) {
   const { data: originalBlob, error: originalError } = await supabaseAdmin.storage
     .from(BUCKET)
     .download(ticket.original_file_url);
@@ -279,6 +335,17 @@ async function finalizeReturn(ticket, returnedCsv, jobId) {
   if (layoutProfile?.is_finaz) finalRows = applyFinazRule(finalRows);
   finalRows = applyPhoneOverflowRule(finalRows, layoutProfile?.phone_overflow_action || 'exclude');
   finalRows = mergePhoneColumns(finalRows);
+
+  return { finalRows, filterLevel };
+}
+
+/**
+ * Sobe o CSV final e marca ticket/job como concluído. `warningMessage`
+ * (opcional) fica gravado no MESMO job em erro_mensagem — o job continua
+ * 'concluido' (o arquivo foi liberado de verdade), só carrega um aviso
+ * interno pra alguém revisar depois (ex: percentual de aprovação baixo).
+ */
+async function publishFinalResult(ticket, finalRows, filterLevel, jobId, warningMessage = null) {
   // Papa.unparse usa vírgula por padrão — o resto do pipeline (arquivo original
   // do cliente, arquivo padronizado enviado à higienizadora) usa ponto e vírgula,
   // então o arquivo final precisa manter o mesmo delimitador.
@@ -319,27 +386,10 @@ async function finalizeReturn(ticket, returnedCsv, jobId) {
   // Por id do job específico (não por ticket_id) — não reescreve o status de
   // outros jobs desse mesmo ticket (ciclos antigos, ou um job de
   // reprocessamento tardio distinto).
-  await supabaseAdmin.from('centrifuga_jobs').update({ status: 'concluido' }).eq('id', jobId);
-
-  return finalRows.length;
-}
-
-/** Roda finalizeReturn e, se der erro, marca o job específico como 'falha' antes de propagar. */
-async function finalizeReturnOrMarkFailed(ticket, returnedCsv, jobId) {
-  try {
-    const count = await finalizeReturn(ticket, returnedCsv, jobId);
-    console.log(`check-retorno: ticket ${ticket.id} higienizado com sucesso (${count} registros aprovados)`);
-  } catch (err) {
-    try {
-      await supabaseAdmin
-        .from('centrifuga_jobs')
-        .update({ status: 'falha', erro_mensagem: err.message })
-        .eq('id', jobId);
-    } catch (updateErr) {
-      console.error(`check-retorno: falha ao gravar status de falha do job ${jobId}:`, updateErr.message);
-    }
-    throw err;
-  }
+  await supabaseAdmin
+    .from('centrifuga_jobs')
+    .update({ status: 'concluido', erro_mensagem: warningMessage })
+    .eq('id', jobId);
 }
 
 // Pura e testável: decide se dois tamanhos de arquivo (bytes) são "o mesmo
@@ -380,6 +430,24 @@ function classifyDivergentReturn(newSizeBytes, storedSizeBytes) {
   if (isSameReturnFile(newSizeBytes, storedSizeBytes)) return 'duplicate';
   if (storedSizeBytes != null && newSizeBytes > storedSizeBytes) return 'reprocess';
   return 'alert';
+}
+
+// Pura e testável: decide o que fazer com o percentual de aprovação de um
+// retorno prestes a ser finalizado — ver a regra completa (Henrique,
+// 2026-09-16) no comentário de MIN_APPROVAL_RATE/MAX_PERCENTUAL_RETRIES.
+// - Sem "telefones_enviados" conhecido (ticket antigo, de antes dessa
+//   feature) -> finaliza sem checar, não dá pra calcular percentual nenhum.
+// - Percentual dentro do esperado -> finaliza normal.
+// - Percentual baixo mas ainda há tentativas -> retry (reagenda).
+// - Percentual baixo e as tentativas acabaram -> finaliza mesmo assim, mas
+//   com aviso (não bloqueia a entrega pra sempre por uma base que pode
+//   genuinamente ter qualidade baixa).
+function classifyApprovalRate(approvedCount, sentCount, attemptsSoFar) {
+  if (!sentCount) return 'finalize';
+  const rate = approvedCount / sentCount;
+  if (rate >= MIN_APPROVAL_RATE) return 'finalize';
+  if (attemptsSoFar < MAX_PERCENTUAL_RETRIES) return 'retry';
+  return 'finalize_with_warning';
 }
 
 // Ticket já FINALIZADO (já passou pela janela de confirmação) — pode ser
@@ -440,7 +508,7 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
   }
 
   if (decision === 'reprocess') {
-    console.warn(`check-retorno: ticket ${ticket.id} recebeu um retorno MAIOR que o já processado (novo: ${newSizeBytes} bytes, anterior: ${storedSizeBytes} bytes) — reprocessando automaticamente`);
+    console.warn(`check-retorno: ticket ${ticket.id} recebeu um retorno MAIOR que o já processado (novo: ${newSizeBytes} bytes, anterior: ${storedSizeBytes} bytes) — reabrindo o ticket pra reprocessar pela janela de confirmação normal`);
 
     const rawUploadPath = `${ticket.client_id}/retorno/${Date.now()}-${ticket.id}.csv`;
     const { error: uploadError } = await supabaseAdmin.storage
@@ -451,18 +519,28 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
       return;
     }
 
-    const { data: newJob, error: insertError } = await supabaseAdmin
+    const { error: insertError } = await supabaseAdmin
       .from('centrifuga_jobs')
-      .insert({ ticket_id: ticket.id, status: 'retorno_recebido', arquivo_retornado_url: rawUploadPath })
-      .select('id')
-      .single();
-    if (insertError || !newJob) {
-      console.error(`check-retorno: falha ao registrar job de reprocessamento do ticket ${ticket.id}:`, insertError?.message);
+      .insert({ ticket_id: ticket.id, status: 'retorno_recebido', arquivo_retornado_url: rawUploadPath });
+    if (insertError) {
+      console.error(`check-retorno: falha ao registrar job de reprocessamento do ticket ${ticket.id}:`, insertError.message);
+      return;
+    }
+
+    // Sem isso, confirmReturn acha o ticket "já finalizado" e só descarta o
+    // job novo sem recalcular nada — reabrir é o que faz esse retorno passar
+    // pelo MESMO fluxo de confirmação/retry por percentual de qualquer
+    // retorno normal, em vez de duplicar essa lógica aqui.
+    const { error: clearError } = await supabaseAdmin
+      .from('tickets')
+      .update({ processed_file_url: null, processed_file_name: null })
+      .eq('id', ticket.id);
+    if (clearError) {
+      console.error(`check-retorno: falha ao reabrir ticket ${ticket.id} pra reprocessamento:`, clearError.message);
       return;
     }
 
     await remove(remotePath);
-    await finalizeReturnOrMarkFailed(ticket, buffer.toString('utf-8'), newJob.id);
     return;
   }
 
@@ -538,5 +616,8 @@ module.exports = {
   shouldReplaceStagedReturn,
   computeConfirmationCutoff,
   classifyDivergentReturn,
+  classifyApprovalRate,
   CONFIRMATION_WINDOW_MS,
+  MIN_APPROVAL_RATE,
+  MAX_PERCENTUAL_RETRIES,
 };
