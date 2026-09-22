@@ -12,8 +12,9 @@ const {
 } = require('./profileRules');
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
+const { notifyDigisacWebhook } = require('./notifyWebhook');
 
-const TICKET_COLUMNS = 'id, client_id, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url, telefones_enviados';
+const TICKET_COLUMNS = 'id, client_id, campaign_name, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url, telefones_enviados';
 
 const SFTP_RETORNO_DIR = process.env.SFTP_RETORNO_DIR || '/flag-contato/Retorno';
 const BUCKET = 'mailing-files';
@@ -370,6 +371,8 @@ async function publishFinalResult(ticket, finalRows, filterLevel, jobId, warning
     throw new Error(`Status 'higienizado' não encontrado: ${statusError?.message || 'nenhuma linha'}`);
   }
 
+  const processedFileName = buildFinalFileName(ticket.mailing_name, filterLevel);
+
   const { error: ticketUpdateError } = await supabaseAdmin
     .from('tickets')
     .update({
@@ -377,11 +380,36 @@ async function publishFinalResult(ticket, finalRows, filterLevel, jobId, warning
       // Nome do Mailing (não o nome do arquivo original que o cliente subiu) —
       // é o que o cliente reconhece na tela, e o que precisa aparecer no
       // download/envio à API.
-      processed_file_name: buildFinalFileName(ticket.mailing_name, filterLevel),
+      processed_file_name: processedFileName,
       status_id: higienizadoStatus.id,
     })
     .eq('id', ticket.id);
   if (ticketUpdateError) throw new Error(`Falha ao atualizar ticket: ${ticketUpdateError.message}`);
+
+  // Notifica via WhatsApp que a higienização terminou de verdade. Roda aqui
+  // (servidor, cron do serviço-ponte) e não no frontend — o toast/som de
+  // "Higienização concluída!" em AdminTickets.tsx só dispara se alguém
+  // estiver com o site aberto e o realtime conectado naquele momento; esse
+  // aviso é o sinal confiável, best-effort (nunca lança).
+  const { data: clientProfile } = await supabaseAdmin
+    .from('profiles')
+    .select('name')
+    .eq('id', ticket.client_id)
+    .maybeSingle();
+
+  await notifyDigisacWebhook({
+    event: 'higienizacao_concluida',
+    ticketId: ticket.id,
+    clientId: ticket.client_id,
+    clientName: clientProfile?.name ?? null,
+    mailingName: ticket.mailing_name,
+    campaignName: ticket.campaign_name,
+    aggressiveness: ticket.aggressiveness,
+    processedFileName,
+    registrosAprovados: finalRows.length,
+    telefonesEnviados: ticket.telefones_enviados ?? null,
+    warningMessage,
+  });
 
   // Por id do job específico (não por ticket_id) — não reescreve o status de
   // outros jobs desse mesmo ticket (ciclos antigos, ou um job de
