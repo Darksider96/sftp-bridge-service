@@ -9,7 +9,17 @@ function getSftpConfig() {
   if (!host || !username || !password) {
     return null;
   }
-  return { host, port, username, password };
+  // Sem keepalive, uma conexão que morre no meio de um list/get pendurava
+  // pra sempre (nenhum erro, nenhum timeout) e travava a varredura do Retorno.
+  return {
+    host,
+    port,
+    username,
+    password,
+    readyTimeout: 20000,
+    keepaliveInterval: 10000,
+    keepaliveCountMax: 3,
+  };
 }
 
 async function withSftpConnection(fn) {

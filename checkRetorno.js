@@ -43,19 +43,40 @@ const CONFIRMATION_WINDOW_MS = 3 * 60 * 1000;
 const MIN_APPROVAL_RATE = 0.30;
 const MAX_PERCENTUAL_RETRIES = 3;
 
-let isChecking = false;
+// Uma varredura normal leva segundos. Se uma operação SFTP pendurar, a trava
+// abaixo nunca era liberada e todo tick seguinte era ignorado até o Render
+// reiniciar — o fluxo inteiro de retorno parava em silêncio.
+const MAX_CHECK_DURATION_MS = 10 * 60 * 1000;
+
+// Status de job que significam "enviado à higienizadora, esperando retorno".
+const AWAITING_RETURN_STATUSES = ['enviado', 'retorno_recebido'];
+
+let checkStartedAt = null;
+
+const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
+let lastHeartbeatAt = 0;
+
+function isCheckStale(startedAt, now = Date.now()) {
+  return startedAt != null && now - startedAt > MAX_CHECK_DURATION_MS;
+}
 
 /** Dispara uma varredura da pasta Retorno, ignorando se já houver uma em andamento. */
 function triggerCheckRetorno() {
-  if (isChecking) {
-    console.log('check-retorno: já em execução, ignorando novo tick');
-    return;
+  if (checkStartedAt != null) {
+    if (!isCheckStale(checkStartedAt)) {
+      console.log('check-retorno: já em execução, ignorando novo tick');
+      return;
+    }
+    console.error(`check-retorno: varredura anterior rodando há mais de ${MAX_CHECK_DURATION_MS / 60000}min (provável SFTP travado) — liberando a trava pra não parar o fluxo`);
   }
-  isChecking = true;
+  const startedAt = Date.now();
+  checkStartedAt = startedAt;
   checkRetorno()
     .catch((err) => console.error('check-retorno: erro fatal na varredura:', err))
     .finally(() => {
-      isChecking = false;
+      // Só libera se ainda for a trava desta varredura (uma varredura travada
+      // que termine tarde não pode liberar a trava de uma mais nova).
+      if (checkStartedAt === startedAt) checkStartedAt = null;
     });
 }
 
@@ -71,6 +92,18 @@ async function checkRetorno() {
   // Só arquivos no nível raiz — ignora quaisquer subpastas (incl. pastas legado
   // que já existam na SFTP). Este serviço nunca cria pastas dentro de Retorno.
   const candidateFiles = files.filter((f) => f.type === '-');
+
+  // Varredura com a pasta vazia não logava nada, então "rodando sem achar
+  // arquivo" e "nem está rodando" ficavam idênticos no log do Render.
+  if (candidateFiles.length > 0 || Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+    const subdirs = files.filter((f) => f.type === 'd').map((f) => f.name);
+    console.log(
+      `check-retorno: varredura ok — ${candidateFiles.length} arquivo(s) na raiz de ${SFTP_RETORNO_DIR}` +
+      (candidateFiles.length ? `: ${candidateFiles.map((f) => f.name).join(', ')}` : '') +
+      (subdirs.length ? ` | subpastas ignoradas: ${subdirs.join(', ')}` : '')
+    );
+    lastHeartbeatAt = Date.now();
+  }
 
   for (const file of candidateFiles) {
     try {
@@ -293,8 +326,28 @@ async function confirmReturn(job) {
     } catch (updateErr) {
       console.error(`check-retorno: falha ao gravar status de falha do job ${job.id}:`, updateErr.message);
     }
+    // Sem isso o ticket ficava parado em silêncio: a falha só aparecia pra
+    // quem abrisse os detalhes do ticket.
+    await notifyDigisacWebhook({
+      event: 'higienizacao_falhou',
+      ticketId: ticket.id,
+      clientId: ticket.client_id,
+      clientName: await getClientName(ticket.client_id),
+      mailingName: ticket.mailing_name,
+      campaignName: ticket.campaign_name,
+      erro: err.message,
+    });
     throw err;
   }
+}
+
+async function getClientName(clientId) {
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('name')
+    .eq('id', clientId)
+    .maybeSingle();
+  return data?.name ?? null;
 }
 
 /**
@@ -391,17 +444,11 @@ async function publishFinalResult(ticket, finalRows, filterLevel, jobId, warning
   // "Higienização concluída!" em AdminTickets.tsx só dispara se alguém
   // estiver com o site aberto e o realtime conectado naquele momento; esse
   // aviso é o sinal confiável, best-effort (nunca lança).
-  const { data: clientProfile } = await supabaseAdmin
-    .from('profiles')
-    .select('name')
-    .eq('id', ticket.client_id)
-    .maybeSingle();
-
   await notifyDigisacWebhook({
     event: 'higienizacao_concluida',
     ticketId: ticket.id,
     clientId: ticket.client_id,
-    clientName: clientProfile?.name ?? null,
+    clientName: await getClientName(ticket.client_id),
     mailingName: ticket.mailing_name,
     campaignName: ticket.campaign_name,
     aggressiveness: ticket.aggressiveness,
@@ -516,10 +563,14 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
   }
   const newSizeBytes = buffer.length;
 
+  // Só jobs que de fato guardaram um retorno — um job de alerta ('falha', sem
+  // arquivo) mais recente fazia o tamanho anterior virar "desconhecido", e
+  // todo tick seguinte caía de novo no alerta.
   const { data: currentJob } = await supabaseAdmin
     .from('centrifuga_jobs')
     .select('arquivo_retornado_url')
     .eq('ticket_id', ticket.id)
+    .not('arquivo_retornado_url', 'is', null)
     .order('criado_em', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -576,6 +627,19 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
   const mensagem = `Retorno adicional recebido em "${fileName}" (${newSizeBytes} bytes) diverge do já processado (${storedSizeBytes ?? 'tamanho desconhecido'} bytes) e não é maior, então não foi reprocessado automaticamente. Arquivo mantido em Retorno — revisar manualmente.`;
   console.warn(`check-retorno: ticket ${ticket.id} — ${mensagem}`);
   try {
+    // O arquivo fica em Retorno de propósito (revisão manual), então este
+    // ponto roda de novo a cada tick — sem essa checagem entrava um job de
+    // falha novo por minuto pro mesmo arquivo.
+    const { data: existingAlert } = await supabaseAdmin
+      .from('centrifuga_jobs')
+      .select('id')
+      .eq('ticket_id', ticket.id)
+      .eq('status', 'falha')
+      .eq('erro_mensagem', mensagem)
+      .limit(1)
+      .maybeSingle();
+    if (existingAlert) return;
+
     await supabaseAdmin.from('centrifuga_jobs').insert({
       ticket_id: ticket.id,
       status: 'falha',
@@ -635,11 +699,33 @@ async function resolveTicket(fileName) {
     .order('created_at', { ascending: true });
   if (pendingError) throw new Error(`Erro ao buscar tickets pendentes: ${pendingError.message}`);
 
-  return matchTicketByFileName(fileName, pendingTickets || []);
+  const { data: awaitingJobs, error: jobsError } = await supabaseAdmin
+    .from('centrifuga_jobs')
+    .select('ticket_id')
+    .in('status', AWAITING_RETURN_STATUSES);
+  if (jobsError) throw new Error(`Erro ao buscar jobs aguardando retorno: ${jobsError.message}`);
+
+  return matchTicketByFileName(fileName, filterTicketsAwaitingReturn(pendingTickets || [], awaitingJobs || []));
+}
+
+// Só tickets que foram de fato enviados à higienizadora podem receber um
+// retorno. Antes, entravam todos os tickets sem arquivo processado —
+// inclusive os que nunca foram higienizados (cliente não optante, envio
+// direto pra API, ticket abandonado) — e, com nomes genéricos como
+// "mailing_finaz.csv" ou "2526.csv", o retorno ia pro ticket MAIS ANTIGO com
+// o mesmo nome, deixando o ticket certo "aguardando retorno" pra sempre.
+// Filtra em memória (não com .in('id', ...)) porque a lista de ids cresce
+// com o histórico e estouraria o tamanho da URL do PostgREST.
+function filterTicketsAwaitingReturn(pendingTickets, awaitingJobs) {
+  const awaitingIds = new Set(awaitingJobs.map((j) => j.ticket_id));
+  return pendingTickets.filter((t) => awaitingIds.has(t.id));
 }
 
 module.exports = {
   triggerCheckRetorno,
+  isCheckStale,
+  filterTicketsAwaitingReturn,
+  MAX_CHECK_DURATION_MS,
   isSameReturnFile,
   shouldReplaceStagedReturn,
   computeConfirmationCutoff,

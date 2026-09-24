@@ -8,6 +8,9 @@ process.env.SUPABASE_SERVICE_ROLE_KEY ??= 'dummy-key-for-tests';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  isCheckStale,
+  filterTicketsAwaitingReturn,
+  MAX_CHECK_DURATION_MS,
   isSameReturnFile,
   shouldReplaceStagedReturn,
   computeConfirmationCutoff,
@@ -135,4 +138,48 @@ test('classifyApprovalRate: sem telefones_enviados conhecido, finaliza sem checa
   assert.equal(classifyApprovalRate(5, 0, 0), 'finalize');
   assert.equal(classifyApprovalRate(5, null, 0), 'finalize');
   assert.equal(classifyApprovalRate(5, undefined, 0), 'finalize');
+});
+
+test('filterTicketsAwaitingReturn: ticket antigo nunca enviado a higienizadora nao "rouba" o retorno', () => {
+  // Retorno chega sem o ticket_id no nome (a higienizadora troca o prefixo).
+  // Um ticket mais antigo com o mesmo nome, que nunca foi higienizado, ficava
+  // primeiro na lista e levava o retorno do ticket certo.
+  const { matchTicketByFileName } = require('./fileNameMatcher');
+  const pending = [
+    { id: 'antigo-nunca-enviado', original_file_name: '2526.csv' },
+    { id: 'me7-enviado', original_file_name: '2526.csv' },
+  ];
+  const awaitingJobs = [{ ticket_id: 'me7-enviado' }];
+
+  const candidates = filterTicketsAwaitingReturn(pending, awaitingJobs);
+  assert.equal(matchTicketByFileName('10033155-2526.csv', candidates).id, 'me7-enviado');
+});
+
+test('filterTicketsAwaitingReturn: sem nenhum job aguardando, nenhum ticket e candidato', () => {
+  const pending = [{ id: 't1', original_file_name: 'mailing_finaz.csv' }];
+  assert.deepEqual(filterTicketsAwaitingReturn(pending, []), []);
+});
+
+test('filterTicketsAwaitingReturn: preserva a ordem (mais antigo primeiro) entre os aguardando', () => {
+  const pending = [
+    { id: 'a', original_file_name: 'mailing_finaz.csv' },
+    { id: 'b', original_file_name: 'mailing_finaz.csv' },
+    { id: 'c', original_file_name: 'mailing_finaz.csv' },
+  ];
+  const awaitingJobs = [{ ticket_id: 'c' }, { ticket_id: 'a' }, { ticket_id: 'a' }];
+  assert.deepEqual(filterTicketsAwaitingReturn(pending, awaitingJobs).map((t) => t.id), ['a', 'c']);
+});
+
+test('isCheckStale: sem varredura em andamento nao e travada', () => {
+  assert.equal(isCheckStale(null, 1_000_000), false);
+});
+
+test('isCheckStale: varredura recente nao e considerada travada', () => {
+  const now = 10_000_000;
+  assert.equal(isCheckStale(now - 60_000, now), false);
+});
+
+test('isCheckStale: varredura mais velha que o limite libera a trava', () => {
+  const now = 10_000_000;
+  assert.equal(isCheckStale(now - MAX_CHECK_DURATION_MS - 1, now), true);
 });
