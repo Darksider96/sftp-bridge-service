@@ -2,7 +2,14 @@
 // por parâmetro: é o código que decide enviar para o discador, então precisa
 // rodar inteiro nos testes (fluxoAutomatico.test.js) sem tocar em nada real.
 
-const { MOTIVOS, resolverDestino, contarRegistros, nomesParaEnvio } = require('./fluxoAutomaticoRegras');
+const {
+  MOTIVOS,
+  resolverDestino,
+  contarRegistros,
+  nomesParaEnvio,
+  deveSegurarPorAprovacao,
+  envioTravado,
+} = require('./fluxoAutomaticoRegras');
 
 const FUNCAO_DE_UPLOAD = {
   synq: 'higienizadora-upload-synq',
@@ -82,7 +89,77 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     }
   }
 
-  return { enviarAoDestino };
+  // Um ticket com problema não pode parar os outros.
+  async function paraCada(tickets, nomeDoPasso, passo) {
+    for (const ticket of tickets) {
+      try {
+        await passo(ticket);
+      } catch (err) {
+        console.error(`fluxo-automatico: erro no passo "${nomeDoPasso}" do ticket ${ticket.id}:`, err.message);
+      }
+    }
+  }
+
+  async function iniciar() {
+    await paraCada(await db.ticketsPorStatus('pendente'), 'iniciar', async (ticket) => {
+      const perfil = await db.perfil(ticket.client_id);
+
+      if (perfil?.optante_higienizacao === false) {
+        if (await db.reservar(ticket.id, 'pendente', 'enviando')) await enviarAoDestino(ticket, perfil, false);
+        return;
+      }
+
+      if (!(await db.reservar(ticket.id, 'pendente', 'higienizando'))) return;
+      try {
+        // Mesma sequência do botão do admin: o processador espera um job 'pendente'.
+        await db.criarJobPendente(ticket.id);
+        const resposta = await chamarFuncao('processador-centrifuga', { ticketId: ticket.id });
+        if (!resposta.data?.success) throw new Error(resposta.data?.error || `HTTP ${resposta.status}`);
+      } catch (err) {
+        await falhar(ticket, perfil, err.message);
+      }
+    });
+  }
+
+  async function enviar() {
+    await paraCada(await db.ticketsPorStatus('higienizando'), 'enviar', async (ticket) => {
+      if (!ticket.processed_file_url) return;
+      // O arquivo é gravado no ticket antes de o job fechar com o aviso de
+      // aprovação; só o job 'concluido' diz se o retorno pode ser enviado.
+      const job = await db.ultimoJob(ticket.id);
+      if (job?.status !== 'concluido') return;
+
+      const perfil = await db.perfil(ticket.client_id);
+      if (deveSegurarPorAprovacao(job)) {
+        if (await db.reservar(ticket.id, 'higienizando', 'pausado', { auto_motivo: MOTIVOS.APROVACAO_BAIXA })) {
+          await evento('envio_automatico_pausado', ticket, perfil, { motivo: MOTIVOS.APROVACAO_BAIXA });
+        }
+        return;
+      }
+
+      if (await db.reservar(ticket.id, 'higienizando', 'enviando')) await enviarAoDestino(ticket, perfil, true);
+    });
+  }
+
+  async function recuperar() {
+    await paraCada(await db.ticketsPorStatus('enviando'), 'recuperar', async (ticket) => {
+      if (!envioTravado(ticket.auto_atualizado_em, agora())) return;
+      const motivo = `${MOTIVOS.FALHA}: envio interrompido — confirme no destino antes de reenviar`;
+      if (await db.reservar(ticket.id, 'enviando', 'falha', { auto_motivo: motivo })) {
+        await evento('envio_automatico_falhou', ticket, await db.perfil(ticket.client_id), { motivo });
+      }
+    });
+  }
+
+  async function avancar() {
+    // 'recuperar' primeiro: nunca trata como travado um envio que esta mesma
+    // varredura acabou de iniciar.
+    await recuperar();
+    await iniciar();
+    await enviar();
+  }
+
+  return { avancar, enviarAoDestino };
 }
 
 module.exports = { criarFluxoAutomatico };
