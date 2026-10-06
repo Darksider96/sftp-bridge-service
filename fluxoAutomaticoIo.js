@@ -4,6 +4,8 @@
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { notifyDigisacWebhook } = require('./notifyWebhook');
 const { criarFluxoAutomatico } = require('./fluxoAutomatico');
+const { registrarAlerta } = require('./alertas');
+const { alertaDoEventoAutomatico } = require('./alertasRegras');
 
 const BUCKET = 'mailing-files';
 const STATUS_FINAL = 'Importado/higienizado, aguardando ativação';
@@ -171,7 +173,14 @@ async function chamarFuncao(nome, corpo) {
   return { status: resposta.status, data: await resposta.json().catch(() => null) };
 }
 
-const fluxo = criarFluxoAutomatico({ db, chamarFuncao, notificar: notifyDigisacWebhook });
+// Todo evento do fluxo automático vai pro webhook (n8n) e, se for um problema,
+// também pra central de alertas do painel.
+async function notificar(evento) {
+  await registrarAlerta(alertaDoEventoAutomatico(evento));
+  await notifyDigisacWebhook(evento);
+}
+
+const fluxo = criarFluxoAutomatico({ db, chamarFuncao, notificar });
 
 // 42703 (Postgres) / PGRST204 (PostgREST): coluna inexistente.
 const COLUNA_AUSENTE = ['42703', 'PGRST204'];

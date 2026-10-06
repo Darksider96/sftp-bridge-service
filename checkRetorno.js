@@ -15,6 +15,8 @@ const { listDir, download, remove } = require('./sftpClient');
 const { notifyDigisacWebhook } = require('./notifyWebhook');
 const { avancarFluxoAutomatico } = require('./fluxoAutomaticoIo');
 const { aoReprocessar } = require('./fluxoAutomaticoRegras');
+const { registrarAlerta } = require('./alertas');
+const { jobsSemRetorno, alertaSemRetorno } = require('./alertasRegras');
 
 const TICKET_COLUMNS = 'id, client_id, campaign_name, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url, telefones_enviados';
 
@@ -58,6 +60,10 @@ let checkStartedAt = null;
 const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
 let lastHeartbeatAt = 0;
 
+// Só olha envios recentes: sem isso, a primeira varredura depois do deploy
+// alertaria todo envio antigo esquecido de antes da central de alertas existir.
+const SEM_RETORNO_JANELA_MS = 3 * 24 * 60 * 60 * 1000;
+
 function isCheckStale(startedAt, now = Date.now()) {
   return startedAt != null && now - startedAt > MAX_CHECK_DURATION_MS;
 }
@@ -90,6 +96,37 @@ async function executarVarredura() {
     console.error('check-retorno: erro fatal na varredura:', err);
   }
   await avancarFluxoAutomatico();
+  try {
+    await alertarTicketsSemRetorno();
+  } catch (err) {
+    console.error('check-retorno: erro ao detectar tickets sem retorno:', err.message);
+  }
+}
+
+async function alertarTicketsSemRetorno(agora = new Date()) {
+  const { data: jobs, error } = await supabaseAdmin
+    .from('centrifuga_jobs')
+    .select('id, ticket_id, status, criado_em')
+    .gte('criado_em', new Date(agora.getTime() - SEM_RETORNO_JANELA_MS).toISOString());
+  if (error) throw new Error(`buscar jobs: ${error.message}`);
+
+  const semRetorno = jobsSemRetorno(jobs || [], agora);
+  if (!semRetorno.length) return;
+
+  const { data: tickets, error: ticketsError } = await supabaseAdmin
+    .from('tickets')
+    .select('id, client_id, mailing_name, processed_file_url')
+    .in('id', semRetorno.map((j) => j.ticket_id));
+  if (ticketsError) throw new Error(`buscar tickets: ${ticketsError.message}`);
+
+  for (const job of semRetorno) {
+    const ticket = (tickets || []).find((t) => t.id === job.ticket_id);
+    // Ticket excluído, ou que já tem arquivo final por outro caminho.
+    if (!ticket || ticket.processed_file_url) continue;
+    await registrarAlerta(
+      alertaSemRetorno(job, ticket, await getClientName(ticket.client_id), SFTP_RETORNO_DIR, agora)
+    );
+  }
 }
 
 async function checkRetorno() {
@@ -139,6 +176,12 @@ async function processReturnedFile(fileName) {
     // Não move nem apaga — arquivo fica na raiz de Retorno para revisão manual.
     // Será relogado a cada tick até alguém resolver manualmente.
     console.log(`check-retorno: "${fileName}" não corresponde a nenhum ticket — órfão, mantido em Retorno`);
+    await registrarAlerta({
+      tipo: 'retorno_orfao',
+      chave: `retorno_orfao:${fileName}`,
+      mensagem: `O arquivo "${fileName}" chegou em ${SFTP_RETORNO_DIR} mas não corresponde a nenhum ticket aguardando retorno. Ele ficou na pasta pra revisão manual.`,
+      detalhes: { fileName },
+    });
     return;
   }
 
@@ -325,6 +368,13 @@ async function confirmReturn(job) {
       : null;
     if (percentualWarning) {
       console.warn(`check-retorno: ticket ${ticket.id} — ${percentualWarning}`);
+      await registrarAlerta({
+        tipo: 'aprovacao_baixa',
+        chave: `aprovacao_baixa:${job.id}`,
+        ticketId: ticket.id,
+        mensagem: percentualWarning,
+        detalhes: { clientName: await getClientName(ticket.client_id), mailingName: ticket.mailing_name },
+      });
     }
 
     await publishFinalResult(ticket, finalRows, filterLevel, job.id, percentualWarning);
@@ -338,6 +388,13 @@ async function confirmReturn(job) {
     } catch (updateErr) {
       console.error(`check-retorno: falha ao gravar status de falha do job ${job.id}:`, updateErr.message);
     }
+    await registrarAlerta({
+      tipo: 'falha_processamento',
+      chave: `falha_processamento:${job.id}`,
+      ticketId: ticket.id,
+      mensagem: `Falha ao processar o retorno da higienizadora: ${err.message}`,
+      detalhes: { clientName: await getClientName(ticket.client_id), mailingName: ticket.mailing_name },
+    });
     // Sem isso o ticket ficava parado em silêncio: a falha só aparecia pra
     // quem abrisse os detalhes do ticket.
     await notifyDigisacWebhook({
@@ -640,6 +697,13 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
   // decision === 'alert'
   const mensagem = `Retorno adicional recebido em "${fileName}" (${newSizeBytes} bytes) diverge do já processado (${storedSizeBytes ?? 'tamanho desconhecido'} bytes) e não é maior, então não foi reprocessado automaticamente. Arquivo mantido em Retorno — revisar manualmente.`;
   console.warn(`check-retorno: ticket ${ticket.id} — ${mensagem}`);
+  await registrarAlerta({
+    tipo: 'retorno_divergente',
+    chave: `retorno_divergente:${ticket.id}:${fileName}:${newSizeBytes}`,
+    ticketId: ticket.id,
+    mensagem,
+    detalhes: { clientName: await getClientName(ticket.client_id), mailingName: ticket.mailing_name, fileName },
+  });
   try {
     // O arquivo fica em Retorno de propósito (revisão manual), então este
     // ponto roda de novo a cada tick — sem essa checagem entrava um job de
