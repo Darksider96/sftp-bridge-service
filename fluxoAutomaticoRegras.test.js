@@ -80,3 +80,64 @@ test('AUTO-07: Dazsoft sem campanha escolhida não é destino válido', () => {
 test('AUTO-20: campanha Dazsoft que não está mais cadastrada não é destino válido', () => {
   assert.deepEqual(resolverDestino(perfil({ auto_campanha_id: '99' }), dazsoft()), { ok: false });
 });
+
+const {
+  deveSegurarPorAprovacao,
+  contarRegistros,
+  envioTravado,
+  nomesParaEnvio,
+} = require('./fluxoAutomaticoRegras');
+
+test('AUTO-19: retorno finalizado com aviso de aprovação baixa segura o envio', () => {
+  const job = { status: 'concluido', erro_mensagem: 'Percentual de aprovação baixo (2644/30000 = 8.8%, mínimo esperado 30%)' };
+  assert.equal(deveSegurarPorAprovacao(job), true);
+});
+
+test('AUTO-11: retorno finalizado sem aviso não segura o envio', () => {
+  assert.equal(deveSegurarPorAprovacao({ status: 'concluido', erro_mensagem: null }), false);
+});
+
+test('AUTO-21: arquivo só com cabeçalho tem zero registros', () => {
+  assert.equal(contarRegistros('ID;NOME;TELEFONE\n'), 0);
+});
+
+test('AUTO-21: arquivo vazio tem zero registros', () => {
+  assert.equal(contarRegistros(''), 0);
+});
+
+test('AUTO-21: arquivo com cabeçalho conta só as linhas de dados', () => {
+  assert.equal(contarRegistros('ID;NOME;TELEFONE\n1;Ana;11987654321\n2;Bia;21987654321\n'), 2);
+});
+
+test('AUTO-21: arquivo sem cabeçalho (layout finaz) conta todas as linhas', () => {
+  assert.equal(contarRegistros('1;Ana Souza;11987654321\n2;Bia Lima;21987654321\n'), 2);
+});
+
+test('AUTO-24: envio parado em "enviando" há mais de 10 minutos está travado', () => {
+  const agora = new Date('2026-10-06T12:00:00.000Z');
+  assert.equal(envioTravado('2026-10-06T11:49:59.000Z', agora), true);
+});
+
+test('AUTO-24: envio em andamento há 10 minutos ou menos não está travado', () => {
+  const agora = new Date('2026-10-06T12:00:00.000Z');
+  assert.equal(envioTravado('2026-10-06T11:50:00.000Z', agora), false);
+  assert.equal(envioTravado('2026-10-06T11:59:00.000Z', agora), false);
+});
+
+test('nome do envio: arquivo higienizado vai com o próprio nome e o mailing sem a extensão', () => {
+  const ticket = { processed_file_name: '2627_HIG_MODERADA.csv', original_file_name: '2526.csv', mailing_name: '2627' };
+  assert.deepEqual(nomesParaEnvio(ticket, true), { fileName: '2627_HIG_MODERADA.csv', mailingName: '2627_HIG_MODERADA' });
+});
+
+test('nome do envio: sem higienização usa o arquivo original e o nome do mailing', () => {
+  const ticket = { processed_file_name: null, original_file_name: 'base.csv', mailing_name: 'Base Outubro' };
+  assert.deepEqual(nomesParaEnvio(ticket, false), { fileName: 'base.csv', mailingName: 'Base_Outubro' });
+});
+
+test('nome do envio: acento é removido e espaço vira "_", como no envio manual', () => {
+  const ticket = { processed_file_name: 'Campanha São João_HIG_MODERADA.csv', original_file_name: 'x.csv', mailing_name: 'x' };
+  assert.deepEqual(nomesParaEnvio(ticket, true), {
+    fileName: 'Campanha_Sao_Joao_HIG_MODERADA.csv',
+    mailingName: 'Campanha_Sao_Joao_HIG_MODERADA',
+  });
+});

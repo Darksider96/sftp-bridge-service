@@ -1,6 +1,8 @@
 // Decisões do fluxo automático de mailings, sem I/O
 // (.specs/features/fluxo-automatico no repositório principal).
 
+const { parseMailingCsv } = require('./mailingNormalizer');
+
 // Textos mostrados ao admin e enviados no webhook — definidos na spec.
 const MOTIVOS = {
   APROVACAO_BAIXA: 'Envio automático pausado: aprovação baixa',
@@ -38,4 +40,51 @@ function resolverDestino(perfil, integracao) {
   return { ok: true, tipo: integracao.integration_type, integracaoId: integracao.id, campanhaId };
 }
 
-module.exports = { MOTIVOS, resolverDestino };
+// O aviso de aprovação abaixo do mínimo é gravado em erro_mensagem no próprio
+// job 'concluido' (checkRetorno.js, publishFinalResult).
+function deveSegurarPorAprovacao(jobConcluido) {
+  return Boolean(jobConcluido?.erro_mensagem);
+}
+
+function contarRegistros(csvText) {
+  return parseMailingCsv(csvText).length;
+}
+
+const LIMITE_ENVIANDO_MS = 10 * 60 * 1000;
+
+// Um envio leva no máximo ~140s (timeout das Edge Functions). Parado em
+// 'enviando' além disso = o serviço caiu no meio; não dá pra saber se o
+// destino recebeu, então nunca é reenviado sozinho.
+function envioTravado(autoAtualizadoEm, agora = new Date()) {
+  return agora.getTime() - new Date(autoAtualizadoEm).getTime() > LIMITE_ENVIANDO_MS;
+}
+
+// Mesmas regras de src/pages/admin/AdminTickets.tsx (normalizeForIntegration,
+// stripFileExtension) — o envio automático tem que nomear igual ao manual.
+function normalizarParaIntegracao(nome) {
+  return nome.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '_');
+}
+
+function semExtensao(nomeArquivo) {
+  const ponto = nomeArquivo.lastIndexOf('.');
+  return ponto === -1 ? nomeArquivo : nomeArquivo.slice(0, ponto);
+}
+
+function nomesParaEnvio(ticket, usarProcessado) {
+  const arquivo = usarProcessado ? ticket.processed_file_name : ticket.original_file_name;
+  const ponto = arquivo.lastIndexOf('.');
+  const extensao = ponto === -1 ? '' : arquivo.slice(ponto);
+  return {
+    fileName: normalizarParaIntegracao(semExtensao(arquivo)) + extensao,
+    mailingName: normalizarParaIntegracao(usarProcessado ? semExtensao(arquivo) : ticket.mailing_name),
+  };
+}
+
+module.exports = {
+  MOTIVOS,
+  resolverDestino,
+  deveSegurarPorAprovacao,
+  contarRegistros,
+  envioTravado,
+  nomesParaEnvio,
+};
