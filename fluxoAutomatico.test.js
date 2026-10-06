@@ -50,6 +50,9 @@ function montar({
   respostas = {},
   reservaNegada = false, // outro processo reservou antes
   erroNoPerfilDe = null,
+  mailings = [],
+  chavesComTicket = [],
+  conflitoAoCriarTicket = false, // outra varredura criou o ticket do mesmo mailing antes
 } = {}) {
   const estado = { tickets: tickets.map((t) => ({ ...t })), chamadas: [], eventos: [], jobsCriados: [], ticketsCriados: [] };
   const achar = (id) => estado.tickets.find((t) => t.id === id);
@@ -79,6 +82,14 @@ function montar({
       estado.jobsCriados.push(ticketId);
     },
     ultimoJob: async (ticketId) => jobs[ticketId] || null,
+    perfisAutomaticos: async () => perfis.filter((p) => p.fluxo_automatico),
+    mailingsDesde: async () => mailings,
+    chavesComTicket: async () => new Set(chavesComTicket),
+    criarTicketDoMailing: async (dados) => {
+      if (conflitoAoCriarTicket) return false;
+      estado.ticketsCriados.push(dados);
+      return true;
+    },
   };
 
   const chamarFuncao = async (nome, corpo) => {
@@ -446,4 +457,107 @@ test('edge case: erro em um ticket não impede os demais de avançar', async () 
 
   assert.equal(ticket('t1').auto_status, 'higienizando');
   assert.deepEqual(estado.jobsCriados, ['t1']);
+});
+
+// ---------------------------------------------------------------------------
+// avancar: tickets a partir de mailings do CRM
+// ---------------------------------------------------------------------------
+
+const mailingCrm = (extra = {}) => ({
+  tipo: 'finaz',
+  id: 'm1',
+  client_id: 'c1',
+  file_name: 'mailing_finaz.csv',
+  file_url: 'c1/finaz/1-mailing_finaz.csv',
+  received_at: '2026-10-06T11:00:00.000Z',
+  ...extra,
+});
+
+test('AUTO-15: mailing CSV do CRM de cliente automático vira ticket com o nome do arquivo e o arquivo recebido', async () => {
+  const { fluxo, estado } = montar({ mailings: [mailingCrm()] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados, [
+    {
+      client_id: 'c1',
+      mailing_name: 'mailing_finaz',
+      campaign_name: '',
+      aggressiveness: 'moderada',
+      original_file_url: 'c1/finaz/1-mailing_finaz.csv',
+      original_file_name: 'mailing_finaz.csv',
+      origem_mailing_tipo: 'finaz',
+      origem_mailing_id: 'm1',
+    },
+  ]);
+});
+
+test('AUTO-02/AUTO-15: ticket do CRM de cliente não optante é criado sem agressividade', async () => {
+  const { fluxo, estado } = montar({
+    mailings: [mailingCrm()],
+    perfis: [perfilBase({ optante_higienizacao: false })],
+  });
+
+  await fluxo.avancar();
+
+  assert.equal(estado.ticketsCriados.length, 1);
+  assert.equal(estado.ticketsCriados[0].aggressiveness, null);
+});
+
+test('AUTO-16: mailing do CRM de cliente com o automático desligado não vira ticket', async () => {
+  const { fluxo, estado } = montar({
+    mailings: [mailingCrm()],
+    perfis: [perfilBase({ fluxo_automatico: false, fluxo_automatico_desde: null })],
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados, []);
+  assert.equal(estado.eventos.length, 0);
+});
+
+test('AUTO-17: mailing do CRM que já tem ticket não gera um segundo', async () => {
+  const { fluxo, estado } = montar({ mailings: [mailingCrm()], chavesComTicket: ['finaz:m1'] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados, []);
+});
+
+test('AUTO-17: se outra varredura criou o ticket do mesmo mailing antes, segue sem erro e sem duplicar', async () => {
+  const { fluxo, estado } = montar({ mailings: [mailingCrm()], conflitoAoCriarTicket: true });
+
+  await assert.doesNotReject(fluxo.avancar());
+
+  assert.deepEqual(estado.ticketsCriados, []);
+  assert.equal(estado.eventos.length, 0);
+});
+
+test('AUTO-18: planilha do CRM não vira ticket e gera o evento de pausa com o motivo exato', async () => {
+  const { fluxo, estado } = montar({ mailings: [mailingCrm({ file_name: 'base.xlsx' })] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados, []);
+  assert.deepEqual(estado.eventos, [
+    {
+      event: 'envio_automatico_pausado',
+      ticketId: null,
+      clientId: 'c1',
+      clientName: 'Cliente Um',
+      mailingName: 'base',
+      integracao: null,
+      registros: null,
+      motivo: 'Mailing do CRM em planilha: crie o ticket manualmente',
+    },
+  ]);
+});
+
+test('AUTO-18: a mesma planilha não gera o aviso de novo a cada varredura', async () => {
+  const { fluxo, estado } = montar({ mailings: [mailingCrm({ file_name: 'base.xlsx' })] });
+
+  await fluxo.avancar();
+  await fluxo.avancar();
+
+  assert.equal(estado.eventos.length, 1);
 });

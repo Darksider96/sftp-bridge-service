@@ -9,7 +9,13 @@ const {
   nomesParaEnvio,
   deveSegurarPorAprovacao,
   envioTravado,
+  mailingsParaTicket,
+  nomeTicketDoMailing,
 } = require('./fluxoAutomaticoRegras');
+
+// Só olha mailings recentes do CRM: limita o custo da varredura sem perder
+// nada que tenha chegado durante uma queda do serviço.
+const JANELA_CRM_MS = 7 * 24 * 60 * 60 * 1000;
 
 const FUNCAO_DE_UPLOAD = {
   synq: 'higienizadora-upload-synq',
@@ -151,10 +157,63 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     });
   }
 
+  // Planilha continua na lista de mailings a cada varredura; sem isto o aviso
+  // sairia de minuto em minuto. Vale enquanto o processo estiver de pé.
+  const planilhasAvisadas = new Set();
+
+  async function criarTicketsDoCrm() {
+    const perfis = await db.perfisAutomaticos();
+    if (!perfis.length) return;
+
+    const desde = new Date(agora().getTime() - JANELA_CRM_MS).toISOString();
+    const mailings = await db.mailingsDesde(desde);
+    const { criar, planilhas } = mailingsParaTicket(mailings, perfis, await db.chavesComTicket(mailings));
+    const perfilPorId = new Map(perfis.map((p) => [p.id, p]));
+
+    for (const mailing of criar) {
+      try {
+        // O banco garante um ticket por mailing; conflito = outra varredura criou antes.
+        await db.criarTicketDoMailing({
+          client_id: mailing.client_id,
+          mailing_name: nomeTicketDoMailing(mailing.file_name),
+          campaign_name: '',
+          aggressiveness: perfilPorId.get(mailing.client_id).optante_higienizacao === false ? null : 'moderada',
+          original_file_url: mailing.file_url,
+          original_file_name: mailing.file_name,
+          origem_mailing_tipo: mailing.tipo,
+          origem_mailing_id: mailing.id,
+        });
+      } catch (err) {
+        console.error(`fluxo-automatico: erro criando ticket do mailing ${mailing.tipo}:${mailing.id}:`, err.message);
+      }
+    }
+
+    for (const mailing of planilhas) {
+      const chave = `${mailing.tipo}:${mailing.id}`;
+      if (planilhasAvisadas.has(chave)) continue;
+      planilhasAvisadas.add(chave);
+      await notificar({
+        event: 'envio_automatico_pausado',
+        ticketId: null,
+        clientId: mailing.client_id,
+        clientName: perfilPorId.get(mailing.client_id).name ?? null,
+        mailingName: nomeTicketDoMailing(mailing.file_name),
+        integracao: null,
+        registros: null,
+        motivo: MOTIVOS.PLANILHA,
+      });
+    }
+  }
+
   async function avancar() {
     // 'recuperar' primeiro: nunca trata como travado um envio que esta mesma
     // varredura acabou de iniciar.
     await recuperar();
+    try {
+      await criarTicketsDoCrm();
+    } catch (err) {
+      console.error('fluxo-automatico: erro criando tickets do CRM:', err.message);
+    }
     await iniciar();
     await enviar();
   }
