@@ -111,7 +111,30 @@ function mailingsParaTicket(mailings, perfis, chavesComTicket) {
   return { criar, planilhas };
 }
 
+/**
+ * O que muda no estado automático quando um retorno maior reabre o ticket
+ * (checkRetorno.js, branch 'reprocess'). null = nada a fazer.
+ */
+function aoReprocessar(ticket) {
+  if (!ticket.fluxo_automatico) return null;
+
+  // O destino já recebeu (ou está recebendo) a lista menor: reenviar sozinho
+  // poderia duplicar. Alguém precisa olhar.
+  if (ticket.auto_status === 'enviando' || ticket.auto_status === 'enviado') {
+    return { campos: { auto_status: 'pausado', auto_motivo: MOTIVOS.RETORNO_MAIOR }, avisar: true };
+  }
+
+  // A pausa foi justamente por suspeita de retorno incompleto; o retorno
+  // completo chegou, então volta pra fila e é avaliado de novo.
+  if (ticket.auto_status === 'pausado' && ticket.auto_motivo === MOTIVOS.APROVACAO_BAIXA) {
+    return { campos: { auto_status: 'higienizando', auto_motivo: null }, avisar: false };
+  }
+
+  return null;
+}
+
 module.exports = {
+  aoReprocessar,
   MOTIVOS,
   resolverDestino,
   deveSegurarPorAprovacao,

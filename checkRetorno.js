@@ -13,6 +13,8 @@ const {
 const { supabaseAdmin } = require('./supabaseAdmin');
 const { listDir, download, remove } = require('./sftpClient');
 const { notifyDigisacWebhook } = require('./notifyWebhook');
+const { avancarFluxoAutomatico } = require('./fluxoAutomaticoIo');
+const { aoReprocessar } = require('./fluxoAutomaticoRegras');
 
 const TICKET_COLUMNS = 'id, client_id, campaign_name, aggressiveness, original_file_url, original_file_name, mailing_name, processed_file_url, telefones_enviados';
 
@@ -71,13 +73,23 @@ function triggerCheckRetorno() {
   }
   const startedAt = Date.now();
   checkStartedAt = startedAt;
-  checkRetorno()
-    .catch((err) => console.error('check-retorno: erro fatal na varredura:', err))
+  executarVarredura()
     .finally(() => {
       // Só libera se ainda for a trava desta varredura (uma varredura travada
       // que termine tarde não pode liberar a trava de uma mais nova).
       if (checkStartedAt === startedAt) checkStartedAt = null;
     });
+}
+
+// As duas etapas são independentes: SFTP fora do ar não pode impedir o fluxo
+// automático de avançar (e vice-versa).
+async function executarVarredura() {
+  try {
+    await checkRetorno();
+  } catch (err) {
+    console.error('check-retorno: erro fatal na varredura:', err);
+  }
+  await avancarFluxoAutomatico();
 }
 
 async function checkRetorno() {
@@ -619,6 +631,8 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
       return;
     }
 
+    await ajustarFluxoAutomaticoNoReprocessamento(ticket);
+
     await remove(remotePath);
     return;
   }
@@ -647,6 +661,43 @@ async function handlePossibleDuplicateReturn(ticket, fileName, remotePath) {
     });
   } catch (err) {
     console.error(`check-retorno: falha ao gravar alerta de retorno divergente pro ticket ${ticket.id}:`, err.message);
+  }
+}
+
+// Consulta separada da TICKET_COLUMNS de propósito: se as colunas do fluxo
+// automático ainda não existem no banco, só este ajuste é pulado — o
+// processamento de retorno não pode depender delas.
+async function ajustarFluxoAutomaticoNoReprocessamento(ticket) {
+  const { data: estado, error } = await supabaseAdmin
+    .from('tickets')
+    .select('fluxo_automatico, auto_status, auto_motivo')
+    .eq('id', ticket.id)
+    .maybeSingle();
+  if (error || !estado) return;
+
+  const ajuste = aoReprocessar(estado);
+  if (!ajuste) return;
+
+  const { error: updateError } = await supabaseAdmin
+    .from('tickets')
+    .update({ ...ajuste.campos, auto_atualizado_em: new Date().toISOString() })
+    .eq('id', ticket.id);
+  if (updateError) {
+    console.error(`check-retorno: falha ao ajustar o fluxo automático do ticket ${ticket.id}:`, updateError.message);
+    return;
+  }
+
+  if (ajuste.avisar) {
+    await notifyDigisacWebhook({
+      event: 'envio_automatico_pausado',
+      ticketId: ticket.id,
+      clientId: ticket.client_id,
+      clientName: await getClientName(ticket.client_id),
+      mailingName: ticket.mailing_name,
+      integracao: null,
+      registros: null,
+      motivo: ajuste.campos.auto_motivo,
+    });
   }
 }
 

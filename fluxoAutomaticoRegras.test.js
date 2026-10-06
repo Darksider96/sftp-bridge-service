@@ -203,3 +203,37 @@ test('AUTO-16: planilha de cliente manual não é sinalizada', () => {
   const planilha = mailing({ client_id: 'manual', file_name: 'base.xlsx' });
   assert.deepEqual(mailingsParaTicket([planilha], perfisCrm, new Set()), { criar: [], planilhas: [] });
 });
+
+const { aoReprocessar } = require('./fluxoAutomaticoRegras');
+
+test('AUTO-25: retorno maior reprocessa ticket já enviado → pausa com o motivo exato e avisa', () => {
+  assert.deepEqual(aoReprocessar({ fluxo_automatico: true, auto_status: 'enviado', auto_motivo: null }), {
+    campos: { auto_status: 'pausado', auto_motivo: 'Retorno maior chegou após o envio — revisar' },
+    avisar: true,
+  });
+});
+
+test('AUTO-25: retorno maior durante o envio em andamento também pausa e avisa', () => {
+  assert.deepEqual(aoReprocessar({ fluxo_automatico: true, auto_status: 'enviando', auto_motivo: null }), {
+    campos: { auto_status: 'pausado', auto_motivo: 'Retorno maior chegou após o envio — revisar' },
+    avisar: true,
+  });
+});
+
+test('premissa: retorno maior depois de pausa por aprovação baixa faz o ticket voltar a seguir sozinho', () => {
+  const ticket = { fluxo_automatico: true, auto_status: 'pausado', auto_motivo: 'Envio automático pausado: aprovação baixa' };
+  assert.deepEqual(aoReprocessar(ticket), { campos: { auto_status: 'higienizando', auto_motivo: null }, avisar: false });
+});
+
+test('AUTO-25: ticket pausado por outro motivo continua pausado no reprocessamento', () => {
+  const ticket = { fluxo_automatico: true, auto_status: 'pausado', auto_motivo: 'Envio automático pausado: destino não configurado' };
+  assert.equal(aoReprocessar(ticket), null);
+});
+
+test('AUTO-25: ticket ainda não enviado segue o fluxo normal no reprocessamento', () => {
+  assert.equal(aoReprocessar({ fluxo_automatico: true, auto_status: 'higienizando', auto_motivo: null }), null);
+});
+
+test('AUTO-13: ticket manual não é afetado pelo reprocessamento', () => {
+  assert.equal(aoReprocessar({ fluxo_automatico: false, auto_status: null, auto_motivo: null }), null);
+});

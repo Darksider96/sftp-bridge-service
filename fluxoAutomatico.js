@@ -166,8 +166,8 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     if (!perfis.length) return;
 
     const desde = new Date(agora().getTime() - JANELA_CRM_MS).toISOString();
-    const mailings = await db.mailingsDesde(desde);
-    const { criar, planilhas } = mailingsParaTicket(mailings, perfis, await db.chavesComTicket(mailings));
+    const mailings = await db.mailingsDesde(desde, perfis.map((p) => p.id));
+    const { criar, planilhas } = mailingsParaTicket(mailings, perfis, await db.chavesComTicket(desde));
     const perfilPorId = new Map(perfis.map((p) => [p.id, p]));
 
     for (const mailing of criar) {
