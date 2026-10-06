@@ -141,3 +141,65 @@ test('nome do envio: acento é removido e espaço vira "_", como no envio manual
     mailingName: 'Campanha_Sao_Joao_HIG_MODERADA',
   });
 });
+
+const { ehPlanilha, nomeTicketDoMailing, mailingsParaTicket } = require('./fluxoAutomaticoRegras');
+
+const LIGADO_EM = '2026-10-06T10:00:00.000Z';
+const perfisCrm = [
+  { id: 'auto', fluxo_automatico: true, fluxo_automatico_desde: LIGADO_EM },
+  { id: 'manual', fluxo_automatico: false, fluxo_automatico_desde: null },
+];
+const mailing = (extra = {}) => ({
+  tipo: 'finaz',
+  id: 'm1',
+  client_id: 'auto',
+  file_name: 'mailing_finaz.csv',
+  file_url: 'auto/finaz/1-mailing_finaz.csv',
+  received_at: '2026-10-06T11:00:00.000Z',
+  ...extra,
+});
+
+test('AUTO-18: .xlsx e .xls são planilha; .csv não', () => {
+  assert.equal(ehPlanilha('base.xlsx'), true);
+  assert.equal(ehPlanilha('BASE.XLS'), true);
+  assert.equal(ehPlanilha('base.csv'), false);
+});
+
+test('AUTO-15: o ticket leva o nome do arquivo sem a extensão', () => {
+  assert.equal(nomeTicketDoMailing('mailing_finaz.csv'), 'mailing_finaz');
+});
+
+test('AUTO-15: mailing CSV de cliente automático, recebido depois de ligar, vira ticket', () => {
+  const m = mailing();
+  assert.deepEqual(mailingsParaTicket([m], perfisCrm, new Set()), { criar: [m], planilhas: [] });
+});
+
+test('AUTO-16: mailing de cliente com o automático desligado não vira ticket', () => {
+  const resultado = mailingsParaTicket([mailing({ client_id: 'manual' })], perfisCrm, new Set());
+  assert.deepEqual(resultado, { criar: [], planilhas: [] });
+});
+
+test('AUTO-17: mailing que já gerou ticket não gera outro', () => {
+  const resultado = mailingsParaTicket([mailing()], perfisCrm, new Set(['finaz:m1']));
+  assert.deepEqual(resultado, { criar: [], planilhas: [] });
+});
+
+test('AUTO-17: o mesmo id em outra origem do CRM é outro mailing', () => {
+  const m = mailing({ tipo: 'vanguard' });
+  assert.deepEqual(mailingsParaTicket([m], perfisCrm, new Set(['finaz:m1'])).criar, [m]);
+});
+
+test('AUTO-27: mailing recebido antes de o automático ser ligado não vira ticket', () => {
+  const antigo = mailing({ received_at: '2026-10-06T09:59:59.000Z' });
+  assert.deepEqual(mailingsParaTicket([antigo], perfisCrm, new Set()), { criar: [], planilhas: [] });
+});
+
+test('AUTO-18: planilha do CRM de cliente automático não vira ticket e é sinalizada', () => {
+  const planilha = mailing({ file_name: 'base.xlsx' });
+  assert.deepEqual(mailingsParaTicket([planilha], perfisCrm, new Set()), { criar: [], planilhas: [planilha] });
+});
+
+test('AUTO-16: planilha de cliente manual não é sinalizada', () => {
+  const planilha = mailing({ client_id: 'manual', file_name: 'base.xlsx' });
+  assert.deepEqual(mailingsParaTicket([planilha], perfisCrm, new Set()), { criar: [], planilhas: [] });
+});

@@ -80,6 +80,37 @@ function nomesParaEnvio(ticket, usarProcessado) {
   };
 }
 
+function ehPlanilha(fileName) {
+  return /\.(xlsx|xls)$/i.test(fileName);
+}
+
+function nomeTicketDoMailing(fileName) {
+  return semExtensao(fileName);
+}
+
+/**
+ * Quais mailings do CRM devem virar ticket automático agora.
+ * @param {{tipo: string, id: string, client_id: string, file_name: string, received_at: string}[]} mailings
+ * @param {{id: string, fluxo_automatico: boolean, fluxo_automatico_desde: string|null}[]} perfis
+ * @param {Set<string>} chavesComTicket "tipo:id" dos mailings que já têm ticket
+ */
+function mailingsParaTicket(mailings, perfis, chavesComTicket) {
+  const perfilPorId = new Map(perfis.map((p) => [p.id, p]));
+  const criar = [];
+  const planilhas = [];
+
+  for (const m of mailings) {
+    const perfil = perfilPorId.get(m.client_id);
+    if (!perfil?.fluxo_automatico || !perfil.fluxo_automatico_desde) continue;
+    // Ligar o automático não dispara os mailings que já estavam parados lá.
+    if (new Date(m.received_at) < new Date(perfil.fluxo_automatico_desde)) continue;
+    if (chavesComTicket.has(`${m.tipo}:${m.id}`)) continue;
+    (ehPlanilha(m.file_name) ? planilhas : criar).push(m);
+  }
+
+  return { criar, planilhas };
+}
+
 module.exports = {
   MOTIVOS,
   resolverDestino,
@@ -87,4 +118,7 @@ module.exports = {
   contarRegistros,
   envioTravado,
   nomesParaEnvio,
+  ehPlanilha,
+  nomeTicketDoMailing,
+  mailingsParaTicket,
 };
