@@ -5,8 +5,9 @@ const { MOTIVOS } = require('./fluxoAutomaticoRegras');
 
 // A higienizadora costuma devolver em minutos. Caso real (ME7, 2026-09-24):
 // ela moveu o arquivo pra Processado e nunca gerou retorno — o ticket ficou
-// "aguardando" em silêncio por horas até alguém notar.
-const SEM_RETORNO_APOS_MS = 60 * 60 * 1000;
+// "aguardando" em silêncio por horas até alguém notar. Prazo definido pelo
+// Henrique (Venditore) em 2026-10-07.
+const SEM_RETORNO_APOS_MS = 20 * 60 * 1000;
 const STATUS_DE_ENVIO = ['pendente', 'enviado'];
 
 /**

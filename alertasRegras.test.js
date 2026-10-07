@@ -11,14 +11,16 @@ const job = (extra = {}) => ({
   ...extra,
 });
 
-test('ALERT-01: envio há mais de 60 min sem nenhum registro posterior está sem retorno', () => {
+test('ALERT-01: envio há mais de 20 min sem nenhum registro posterior está sem retorno', () => {
   assert.deepEqual(jobsSemRetorno([job()], AGORA), [job()]);
+  const ha21min = job({ id: 'j9', ticket_id: 't9', criado_em: '2026-09-24T21:09:00.000Z' });
+  assert.deepEqual(jobsSemRetorno([ha21min], AGORA), [ha21min]);
 });
 
-test('ALERT-01: envio há 60 min ou menos ainda não está sem retorno', () => {
-  const exatos60 = job({ criado_em: '2026-09-24T20:30:00.000Z' });
-  const recente = job({ id: 'j2', ticket_id: 't2', criado_em: '2026-09-24T21:00:00.000Z' });
-  assert.deepEqual(jobsSemRetorno([exatos60, recente], AGORA), []);
+test('ALERT-01: envio há 20 min ou menos ainda não está sem retorno', () => {
+  const exatos20 = job({ criado_em: '2026-09-24T21:10:00.000Z' });
+  const recente = job({ id: 'j2', ticket_id: 't2', criado_em: '2026-09-24T21:25:00.000Z' });
+  assert.deepEqual(jobsSemRetorno([exatos20, recente], AGORA), []);
 });
 
 test('ALERT-01: envio que já tem registro posterior de retorno não está sem retorno', () => {
@@ -36,7 +38,7 @@ test('ALERT-01: reenvio — só o envio mais recente do ticket é avaliado', () 
   assert.deepEqual(jobsSemRetorno([job(), reenvio], AGORA).map((j) => j.id), ['j2']);
 });
 
-test('ALERT-01: envio que nem saiu do nosso lado (pendente) há mais de 60 min também é sinalizado', () => {
+test('ALERT-01: envio que nem saiu do nosso lado (pendente) há mais de 20 min também é sinalizado', () => {
   assert.deepEqual(jobsSemRetorno([job({ status: 'pendente' })], AGORA).map((j) => j.id), ['j1']);
 });
 
