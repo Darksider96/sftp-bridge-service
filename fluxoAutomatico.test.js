@@ -92,6 +92,20 @@ function montar({
     perfisAutomaticos: async () => perfis.filter((p) => p.fluxo_automatico),
     mailingsDesde: async () => mailings,
     chavesComTicket: async () => new Set(chavesComTicket),
+    registroDoTicket: async (id) => {
+      const t = achar(id);
+      return t ? { id: t.id, created_at: t.created_at ?? null, quantidade_registros: t.quantidade_registros ?? null } : null;
+    },
+    ticketsMesmoMailing: async ({ clientId, mailingName, quantidade, desde }) =>
+      estado.tickets
+        .filter(
+          (t) =>
+            t.client_id === clientId &&
+            t.mailing_name === mailingName &&
+            t.quantidade_registros === quantidade &&
+            t.created_at >= desde
+        )
+        .map((t) => ({ id: t.id, created_at: t.created_at })),
     criarTicketDoMailing: async (dados) => {
       if (conflitoAoCriarTicket) return false;
       estado.ticketsCriados.push(dados);
@@ -188,7 +202,7 @@ test('AUTO-11: o arquivo higienizado vai para a Synq do cliente com o nome do en
   ]);
 });
 
-test('AUTO-11: destino Dazsoft recebe a campanha configurada no cliente', async () => {
+test('AUTO-06/AUTO-20: cliente apontando para a Dazsoft não tem destino automático — nada é enviado e o ticket pausa', async () => {
   const { fluxo, estado, ticket } = montar({
     tickets: [ticketBase()],
     integracoes: [integracaoDazsoft],
@@ -198,10 +212,10 @@ test('AUTO-11: destino Dazsoft recebe a campanha configurada no cliente', async 
 
   await fluxo.enviarAoDestino(ticketBase(), perfil, true);
 
-  assert.equal(uploads(estado).length, 1);
-  assert.equal(uploads(estado)[0].nome, 'higienizadora-upload-dazsoft');
-  assert.equal(uploads(estado)[0].corpo.campanha_id, '77');
-  assert.equal(ticket().auto_integracao, 'dazsoft');
+  assert.equal(uploads(estado).length, 0);
+  assert.equal(ticket().auto_status, 'pausado');
+  assert.equal(ticket().auto_motivo, 'Envio automático pausado: destino não configurado');
+  assert.equal(estado.eventos[0].event, 'envio_automatico_pausado');
 });
 
 test('AUTO-20: destino inválido → nada é enviado, ticket pausado com o motivo exato e evento de pausa', async () => {
@@ -557,6 +571,7 @@ const mailingCrm = (extra = {}) => ({
   file_name: 'mailing_finaz.csv',
   file_url: 'c1/finaz/1-mailing_finaz.csv',
   received_at: '2026-10-06T11:00:00.000Z',
+  records_count: 2,
   ...extra,
 });
 
@@ -575,6 +590,7 @@ test('AUTO-15: mailing CSV do CRM de cliente automático vira ticket com o nome 
       original_file_name: 'mailing_finaz.csv',
       origem_mailing_tipo: 'finaz',
       origem_mailing_id: 'm1',
+      quantidade_registros: 2,
     },
   ]);
 });
@@ -647,4 +663,118 @@ test('AUTO-18: a mesma planilha não gera o aviso de novo a cada varredura', asy
   await fluxo.avancar();
 
   assert.equal(estado.eventos.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// avancar: mailing repetido (mesmo nome e mesma quantidade de contatos)
+// ---------------------------------------------------------------------------
+
+const MOTIVO_REPETIDO = 'Envio automático pausado: mailing repetido (mesmo nome e mesma quantidade de contatos)';
+const processadorOk = { 'processador-centrifuga': { status: 200, data: { success: true } } };
+const enviado = (id, minuto, extra = {}) =>
+  pendente({ id, created_at: `2026-10-06T11:${minuto}:00.000Z`, quantidade_registros: 1500, ...extra });
+
+test('AUTO-29: cliente enviou o mesmo mailing várias vezes → só o primeiro segue, os outros param sem aviso', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [enviado('t1', '00'), enviado('t2', '01'), enviado('t3', '02')],
+    respostas: processadorOk,
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(processador(estado).map((c) => c.corpo.ticketId), ['t1']);
+  assert.deepEqual(estado.jobsCriados, ['t1']);
+  assert.equal(ticket('t1').auto_status, 'higienizando');
+  assert.equal(ticket('t2').auto_status, 'pausado');
+  assert.equal(ticket('t2').auto_motivo, MOTIVO_REPETIDO);
+  assert.equal(ticket('t3').auto_status, 'pausado');
+  assert.equal(ticket('t3').auto_motivo, MOTIVO_REPETIDO);
+  assert.equal(estado.eventos.length, 0);
+});
+
+test('AUTO-29: mesmo nome com quantidade de contatos diferente não é repetido', async () => {
+  const { fluxo, estado } = montar({
+    tickets: [enviado('t1', '00'), enviado('t2', '01', { quantidade_registros: 1501 })],
+    respostas: processadorOk,
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.jobsCriados, ['t1', 't2']);
+});
+
+test('AUTO-29: mesma quantidade com nome diferente não é repetido', async () => {
+  const { fluxo, estado } = montar({
+    tickets: [enviado('t1', '00'), enviado('t2', '01', { mailing_name: 'Base Novembro' })],
+    respostas: processadorOk,
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.jobsCriados, ['t1', 't2']);
+});
+
+test('AUTO-29: mesmo nome e quantidade de outro cliente não é repetido', async () => {
+  const { fluxo, estado } = montar({
+    tickets: [enviado('t1', '00'), enviado('t2', '01', { client_id: 'c2' })],
+    perfis: [perfilBase(), perfilBase({ id: 'c2' })],
+    respostas: processadorOk,
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.jobsCriados, ['t1', 't2']);
+});
+
+test('AUTO-29: o igual anterior já foi enviado ao discador → o novo também para', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [enviado('t1', '00', { auto_status: 'enviado' }), enviado('t2', '30')],
+    respostas: processadorOk,
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.jobsCriados, []);
+  assert.equal(ticket('t2').auto_motivo, MOTIVO_REPETIDO);
+});
+
+test('AUTO-29: mailing igual de mais de 24 horas atrás não segura o novo', async () => {
+  const antigo = pendente({ id: 't1', auto_status: 'enviado', created_at: '2026-10-05T10:59:00.000Z', quantidade_registros: 1500 });
+  const { fluxo, estado } = montar({ tickets: [antigo, enviado('t2', '00')], respostas: processadorOk });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.jobsCriados, ['t2']);
+});
+
+test('AUTO-29: sem a quantidade de registros gravada não há como comparar — o ticket segue', async () => {
+  const { fluxo, estado } = montar({
+    tickets: [enviado('t1', '00', { quantidade_registros: null }), enviado('t2', '01', { quantidade_registros: null })],
+    respostas: processadorOk,
+  });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.jobsCriados, ['t1', 't2']);
+});
+
+test('AUTO-29: cliente sem higienização — o repetido também não vai para o discador', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [enviado('t1', '00'), enviado('t2', '01')],
+    perfis: [perfilBase({ optante_higienizacao: false })],
+    arquivos: { 'c1/original/base.csv': CSV_2_REGISTROS },
+    respostas: {
+      'higienizadora-ensure-mailing-header': {
+        status: 200,
+        data: { success: true, changed: false, fileUrl: 'c1/original/base.csv', fileName: 'base.csv' },
+      },
+    },
+  });
+
+  await fluxo.avancar();
+
+  assert.equal(uploads(estado).length, 1);
+  assert.equal(uploads(estado)[0].corpo.ticketId, 't1');
+  assert.equal(ticket('t2').auto_status, 'pausado');
+  assert.equal(ticket('t2').auto_motivo, MOTIVO_REPETIDO);
 });

@@ -5,6 +5,8 @@
 const {
   MOTIVOS,
   resolverDestino,
+  ehRepetido,
+  JANELA_REPETIDO_MS,
   contarRegistros,
   nomesParaEnvio,
   deveSegurarPorAprovacao,
@@ -20,10 +22,7 @@ const {
 // nada que tenha chegado durante uma queda do serviço.
 const JANELA_CRM_MS = 7 * 24 * 60 * 60 * 1000;
 
-const FUNCAO_DE_UPLOAD = {
-  synq: 'higienizadora-upload-synq',
-  dazsoft: 'higienizadora-upload-dazsoft',
-};
+const FUNCAO_DE_UPLOAD = 'higienizadora-upload-synq';
 
 const CONFIRME_NO_DESTINO = 'confirme no destino antes de reenviar';
 const aguardar = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -96,9 +95,7 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
       if (registros === 0) return pausar(ticket, perfil, MOTIVOS.SEM_REGISTROS);
 
       const corpo = { ticketId: ticket.id, clientId: ticket.client_id, fileUrl, fileName, mailing_name: mailingName };
-      if (destino.tipo === 'dazsoft') corpo.campanha_id = destino.campanhaId;
-
-      await enviarComTentativas(FUNCAO_DE_UPLOAD[destino.tipo], corpo);
+      await enviarComTentativas(FUNCAO_DE_UPLOAD, corpo);
 
       const campos = {
         auto_status: 'enviado',
@@ -126,8 +123,27 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     }
   }
 
+  async function mailingRepetido(ticket) {
+    const atual = await db.registroDoTicket(ticket.id);
+    if (!atual || atual.quantidade_registros == null) return false;
+    const iguais = await db.ticketsMesmoMailing({
+      clientId: ticket.client_id,
+      mailingName: ticket.mailing_name,
+      quantidade: atual.quantidade_registros,
+      desde: new Date(new Date(atual.created_at).getTime() - JANELA_REPETIDO_MS).toISOString(),
+    });
+    return ehRepetido(atual, iguais);
+  }
+
   async function iniciar() {
     await paraCada(await db.ticketsPorStatus('pendente'), 'iniciar', async (ticket) => {
+      // Sem evento: repetição é esperada (cliente clicou de novo), não um
+      // problema pra alguém resolver. O motivo aparece no ticket.
+      if (await mailingRepetido(ticket)) {
+        await db.reservar(ticket.id, 'pendente', 'pausado', { auto_motivo: MOTIVOS.REPETIDO });
+        return;
+      }
+
       const perfil = await db.perfil(ticket.client_id);
 
       if (perfil?.optante_higienizacao === false) {
@@ -202,6 +218,7 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
           original_file_name: mailing.file_name,
           origem_mailing_tipo: mailing.tipo,
           origem_mailing_id: mailing.id,
+          quantidade_registros: mailing.records_count ?? null,
         });
       } catch (err) {
         console.error(`fluxo-automatico: erro criando ticket do mailing ${mailing.tipo}:${mailing.id}:`, err.message);

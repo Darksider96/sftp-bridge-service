@@ -13,7 +13,10 @@ const TABELAS_CRM = { finaz: 'finaz_mailings', vanguard: 'vanguard_mailings', pr
 const COLUNAS_TICKET =
   'id, client_id, mailing_name, original_file_url, original_file_name, processed_file_url, processed_file_name, auto_status, auto_atualizado_em';
 const COLUNAS_PERFIL =
-  'id, name, optante_higienizacao, fluxo_automatico, fluxo_automatico_desde, auto_integracao_id, auto_campanha_id';
+  'id, name, optante_higienizacao, fluxo_automatico, fluxo_automatico_desde, auto_integracao_id';
+
+// 42703 (Postgres) / PGRST204 (PostgREST): coluna inexistente.
+const COLUNA_AUSENTE = ['42703', 'PGRST204'];
 
 // As Edge Functions de envio abortam em 140s; um pouco mais que isso aqui.
 const TIMEOUT_FUNCAO_MS = 160 * 1000;
@@ -109,6 +112,31 @@ const db = {
     );
   },
 
+  // Dados da regra do mailing repetido. Sem a coluna quantidade_registros
+  // (migration pendente) devolve null e a regra simplesmente não se aplica.
+  async registroDoTicket(ticketId) {
+    const resposta = await supabaseAdmin
+      .from('tickets')
+      .select('id, created_at, quantidade_registros')
+      .eq('id', ticketId)
+      .maybeSingle();
+    if (resposta.error && COLUNA_AUSENTE.includes(resposta.error.code)) return null;
+    return exigir(resposta, 'buscar quantidade de registros do ticket');
+  },
+
+  async ticketsMesmoMailing({ clientId, mailingName, quantidade, desde }) {
+    return exigir(
+      await supabaseAdmin
+        .from('tickets')
+        .select('id, created_at')
+        .eq('client_id', clientId)
+        .eq('mailing_name', mailingName)
+        .eq('quantidade_registros', quantidade)
+        .gte('created_at', desde),
+      'buscar tickets do mesmo mailing'
+    );
+  },
+
   async perfisAutomaticos() {
     return exigir(
       await supabaseAdmin.from('profiles').select(COLUNAS_PERFIL).eq('fluxo_automatico', true),
@@ -122,7 +150,7 @@ const db = {
       const linhas = exigir(
         await supabaseAdmin
           .from(tabela)
-          .select('id, client_id, file_name, file_url, received_at')
+          .select('id, client_id, file_name, file_url, received_at, records_count')
           .in('client_id', clientIds)
           .gte('received_at', desde),
         `buscar mailings ${tipo}`
@@ -155,7 +183,12 @@ const db = {
     const inicial = statuses.find((s) => s.type === 'em_fila') || statuses[0];
     if (!inicial) throw new Error('nenhum status de ticket cadastrado');
 
-    const { error } = await supabaseAdmin.from('tickets').insert({ ...dados, status_id: inicial.id });
+    let { error } = await supabaseAdmin.from('tickets').insert({ ...dados, status_id: inicial.id });
+    if (error && COLUNA_AUSENTE.includes(error.code)) {
+      // quantidade_registros é de uma migration posterior à do fluxo automático.
+      const { quantidade_registros, ...semQuantidade } = dados;
+      ({ error } = await supabaseAdmin.from('tickets').insert({ ...semQuantidade, status_id: inicial.id }));
+    }
     if (error?.code === '23505') return false; // outra varredura já criou o ticket deste mailing
     if (error) throw new Error(`criar ticket do mailing: ${error.message}`);
     return true;
@@ -182,8 +215,6 @@ async function notificar(evento) {
 
 const fluxo = criarFluxoAutomatico({ db, chamarFuncao, notificar });
 
-// 42703 (Postgres) / PGRST204 (PostgREST): coluna inexistente.
-const COLUNA_AUSENTE = ['42703', 'PGRST204'];
 let avisouColunasAusentes = false;
 
 /** Uma passada do fluxo automático. Nunca lança. */

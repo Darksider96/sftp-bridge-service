@@ -28,6 +28,7 @@ test('MOTIVOS: textos exatos definidos na spec', () => {
   assert.equal(MOTIVOS.FALHA, 'Falha no envio automático');
   assert.equal(MOTIVOS.RETORNO_MAIOR, 'Retorno maior chegou após o envio — revisar');
   assert.equal(MOTIVOS.PLANILHA, 'Mailing do CRM em planilha: crie o ticket manualmente');
+  assert.equal(MOTIVOS.REPETIDO, 'Envio automático pausado: mailing repetido (mesmo nome e mesma quantidade de contatos)');
 });
 
 test('AUTO-06: integração Synq ativa do próprio cliente é destino válido', () => {
@@ -35,22 +36,11 @@ test('AUTO-06: integração Synq ativa do próprio cliente é destino válido', 
     ok: true,
     tipo: 'synq',
     integracaoId: 'int-1',
-    campanhaId: null,
   });
 });
 
-test('AUTO-07: Dazsoft com campanha cadastrada na integração é destino válido e leva a campanha', () => {
-  assert.deepEqual(resolverDestino(perfil({ auto_campanha_id: '77' }), dazsoft()), {
-    ok: true,
-    tipo: 'dazsoft',
-    integracaoId: 'int-1',
-    campanhaId: '77',
-  });
-});
-
-test('AUTO-07: Dazsoft no formato antigo (campanha_id único na config) também é aceito', () => {
-  const integracao = dazsoft({ config: { campanha_id: '55' } });
-  assert.equal(resolverDestino(perfil({ auto_campanha_id: '55' }), integracao).ok, true);
+test('AUTO-06: Dazsoft não é mais destino do automático, mesmo ativa e com campanha escolhida', () => {
+  assert.deepEqual(resolverDestino(perfil({ auto_campanha_id: '77' }), dazsoft()), { ok: false });
 });
 
 test('AUTO-20: cliente sem destino configurado não tem destino válido', () => {
@@ -71,14 +61,6 @@ test('AUTO-20: integração de outro cliente não é destino válido', () => {
 
 test('AUTO-06: Argus não é destino do automático', () => {
   assert.deepEqual(resolverDestino(perfil(), synq({ integration_type: 'argus' })), { ok: false });
-});
-
-test('AUTO-07: Dazsoft sem campanha escolhida não é destino válido', () => {
-  assert.deepEqual(resolverDestino(perfil({ auto_campanha_id: null }), dazsoft()), { ok: false });
-});
-
-test('AUTO-20: campanha Dazsoft que não está mais cadastrada não é destino válido', () => {
-  assert.deepEqual(resolverDestino(perfil({ auto_campanha_id: '99' }), dazsoft()), { ok: false });
 });
 
 const {
@@ -261,4 +243,36 @@ test('AUTO-22/AUTO-24: resposta sem corpo (a função de envio caiu) não é ten
 test('AUTO-22: são três tentativas de envio ao destino, com 30 segundos entre elas', () => {
   assert.equal(MAX_TENTATIVAS_ENVIO, 3);
   assert.equal(INTERVALO_TENTATIVAS_MS, 30000);
+});
+
+const { ehRepetido, JANELA_REPETIDO_MS } = require('./fluxoAutomaticoRegras');
+const registro = (id, created_at) => ({ id, created_at });
+const ATUAL = registro('t2', '2026-10-07T15:00:00.000Z');
+
+test('AUTO-29: a janela do mailing repetido é de 24 horas', () => {
+  assert.equal(JANELA_REPETIDO_MS, 24 * 60 * 60 * 1000);
+});
+
+test('AUTO-29: é repetido quando existe outro ticket igual criado antes, dentro de 24 horas', () => {
+  assert.equal(ehRepetido(ATUAL, [registro('t1', '2026-10-07T14:59:00.000Z')]), true);
+  assert.equal(ehRepetido(ATUAL, [registro('t1', '2026-10-06T15:00:00.000Z')]), true);
+});
+
+test('AUTO-29: o primeiro ticket nunca é o repetido (os iguais vieram depois)', () => {
+  assert.equal(ehRepetido(ATUAL, [registro('t3', '2026-10-07T15:01:00.000Z')]), false);
+});
+
+test('AUTO-29: o próprio ticket na lista não conta', () => {
+  assert.equal(ehRepetido(ATUAL, [ATUAL]), false);
+  assert.equal(ehRepetido(ATUAL, []), false);
+});
+
+test('AUTO-29: ticket igual de mais de 24 horas atrás não torna este repetido', () => {
+  assert.equal(ehRepetido(ATUAL, [registro('t1', '2026-10-06T14:59:59.000Z')]), false);
+});
+
+test('AUTO-29: criados no mesmo instante — só um segue (o de menor id)', () => {
+  const gemeo = registro('t1', ATUAL.created_at);
+  assert.equal(ehRepetido(ATUAL, [gemeo]), true);
+  assert.equal(ehRepetido(gemeo, [ATUAL]), false);
 });

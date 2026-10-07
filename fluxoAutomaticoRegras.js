@@ -11,33 +11,43 @@ const MOTIVOS = {
   FALHA: 'Falha no envio automático',
   RETORNO_MAIOR: 'Retorno maior chegou após o envio — revisar',
   PLANILHA: 'Mailing do CRM em planilha: crie o ticket manualmente',
+  REPETIDO: 'Envio automático pausado: mailing repetido (mesmo nome e mesma quantidade de contatos)',
 };
 
-const TIPOS_DESTINO = ['synq', 'dazsoft'];
-
-function campanhasDazsoft(config) {
-  const lista = (config?.campanhas || []).map((c) => String(c.campanha_id));
-  if (config?.campanha_id) lista.push(String(config.campanha_id));
-  return lista;
-}
+// Só a Synq: a Dazsoft saiu do automático por definição do Henrique
+// (Venditore, 2026-10-07), como a Argus já tinha saído.
+const TIPO_DESTINO = 'synq';
 
 /**
  * Para onde vai o mailing de um cliente automático.
- * @param {{id: string, auto_integracao_id: string|null, auto_campanha_id: string|null}} perfil
+ * @param {{id: string, auto_integracao_id: string|null}} perfil
  * @param {object|null} integracao linha de client_integrations apontada pelo perfil
  */
 function resolverDestino(perfil, integracao) {
   if (!perfil.auto_integracao_id || !integracao) return { ok: false };
   if (integracao.client_id !== perfil.id || !integracao.active) return { ok: false };
-  if (!TIPOS_DESTINO.includes(integracao.integration_type)) return { ok: false };
+  if (integracao.integration_type !== TIPO_DESTINO) return { ok: false };
 
-  let campanhaId = null;
-  if (integracao.integration_type === 'dazsoft') {
-    campanhaId = perfil.auto_campanha_id;
-    if (!campanhaId || !campanhasDazsoft(integracao.config).includes(String(campanhaId))) return { ok: false };
-  }
+  return { ok: true, tipo: TIPO_DESTINO, integracaoId: integracao.id };
+}
 
-  return { ok: true, tipo: integracao.integration_type, integracaoId: integracao.id, campanhaId };
+// Há clientes que clicam em enviar o mesmo mailing várias vezes. Regra do
+// Henrique (2026-10-07): mesmo nome e mesma quantidade de contatos = o mesmo
+// mailing, e só um é enviado. A janela de 24h é premissa nossa.
+const JANELA_REPETIDO_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * @param {{id: string, created_at: string}} atual
+ * @param {{id: string, created_at: string}[]} iguais tickets do mesmo cliente com o mesmo nome e a mesma quantidade
+ */
+function ehRepetido(atual, iguais) {
+  const criadoEm = new Date(atual.created_at).getTime();
+  return iguais.some((outro) => {
+    if (outro.id === atual.id) return false;
+    const outroEm = new Date(outro.created_at).getTime();
+    if (criadoEm - outroEm > JANELA_REPETIDO_MS) return false;
+    return outroEm < criadoEm || (outroEm === criadoEm && outro.id < atual.id);
+  });
 }
 
 // O aviso de aprovação abaixo do mínimo é gravado em erro_mensagem no próprio
@@ -152,6 +162,8 @@ module.exports = {
   aoReprocessar,
   MOTIVOS,
   resolverDestino,
+  ehRepetido,
+  JANELA_REPETIDO_MS,
   deveSegurarPorAprovacao,
   contarRegistros,
   envioTravado,
