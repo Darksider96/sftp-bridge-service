@@ -50,6 +50,21 @@ function contarRegistros(csvText) {
   return parseMailingCsv(csvText).length;
 }
 
+// Definição do Henrique (Venditore, 2026-10-07): três tentativas antes de avisar.
+const MAX_TENTATIVAS_ENVIO = 3;
+const INTERVALO_TENTATIVAS_MS = 30 * 1000;
+
+// Códigos que as funções de envio devolvem quando o destino não chegou a
+// responder (tempo esgotado, conexão caiu no meio, gateway). O mailing pode
+// ter sido importado, então repetir arriscaria importar em dobro.
+const STATUS_SEM_RESPOSTA = [408, 502, 504];
+
+/** Só repete quando há uma resposta de erro: aí o destino recusou o arquivo. */
+function podeRepetirEnvio(resposta) {
+  if (!resposta?.data) return false;
+  return !STATUS_SEM_RESPOSTA.includes(resposta.data.status);
+}
+
 const LIMITE_ENVIANDO_MS = 10 * 60 * 1000;
 
 // Um envio leva no máximo ~140s (timeout das Edge Functions). Parado em
@@ -140,6 +155,9 @@ module.exports = {
   deveSegurarPorAprovacao,
   contarRegistros,
   envioTravado,
+  podeRepetirEnvio,
+  MAX_TENTATIVAS_ENVIO,
+  INTERVALO_TENTATIVAS_MS,
   nomesParaEnvio,
   ehPlanilha,
   nomeTicketDoMailing,

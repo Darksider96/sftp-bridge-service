@@ -9,6 +9,9 @@ const {
   nomesParaEnvio,
   deveSegurarPorAprovacao,
   envioTravado,
+  podeRepetirEnvio,
+  MAX_TENTATIVAS_ENVIO,
+  INTERVALO_TENTATIVAS_MS,
   mailingsParaTicket,
   nomeTicketDoMailing,
 } = require('./fluxoAutomaticoRegras');
@@ -22,7 +25,10 @@ const FUNCAO_DE_UPLOAD = {
   dazsoft: 'higienizadora-upload-dazsoft',
 };
 
-function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new Date() }) {
+const CONFIRME_NO_DESTINO = 'confirme no destino antes de reenviar';
+const aguardar = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new Date(), esperar = aguardar }) {
   async function evento(event, ticket, perfil, extra = {}) {
     await notificar({
       event,
@@ -42,12 +48,29 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     await evento('envio_automatico_pausado', ticket, perfil, { motivo });
   }
 
-  // Sem nova tentativa: o destino pode ter recebido o arquivo mesmo
-  // respondendo erro, e reenviar importaria o mailing em dobro.
   async function falhar(ticket, perfil, detalhe, integracao = null) {
     const motivo = `${MOTIVOS.FALHA}: ${detalhe}`;
     await db.marcar(ticket.id, { auto_status: 'falha', auto_motivo: motivo });
     await evento('envio_automatico_falhou', ticket, perfil, { motivo, integracao });
+  }
+
+  // Repete só quando o destino respondeu com erro. Sem resposta, o mailing
+  // pode ter entrado no discador: para na hora e pede conferência.
+  async function enviarComTentativas(funcao, corpo) {
+    for (let tentativa = 1; ; tentativa++) {
+      let resposta;
+      try {
+        resposta = await chamarFuncao(funcao, corpo);
+      } catch (err) {
+        throw new Error(`${err.message} — ${CONFIRME_NO_DESTINO}`);
+      }
+      if (resposta.data?.success) return;
+
+      const detalhe = resposta.data?.message || `HTTP ${resposta.status}`;
+      if (!podeRepetirEnvio(resposta)) throw new Error(`${detalhe} — ${CONFIRME_NO_DESTINO}`);
+      if (tentativa === MAX_TENTATIVAS_ENVIO) throw new Error(`${detalhe} (${MAX_TENTATIVAS_ENVIO} tentativas)`);
+      await esperar(INTERVALO_TENTATIVAS_MS);
+    }
   }
 
   /** O ticket já precisa estar reservado em 'enviando'. */
@@ -75,10 +98,7 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
       const corpo = { ticketId: ticket.id, clientId: ticket.client_id, fileUrl, fileName, mailing_name: mailingName };
       if (destino.tipo === 'dazsoft') corpo.campanha_id = destino.campanhaId;
 
-      const resposta = await chamarFuncao(FUNCAO_DE_UPLOAD[destino.tipo], corpo);
-      if (!resposta.data?.success) {
-        throw new Error(resposta.data?.message || `HTTP ${resposta.status}`);
-      }
+      await enviarComTentativas(FUNCAO_DE_UPLOAD[destino.tipo], corpo);
 
       const campos = {
         auto_status: 'enviado',
@@ -150,7 +170,7 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
   async function recuperar() {
     await paraCada(await db.ticketsPorStatus('enviando'), 'recuperar', async (ticket) => {
       if (!envioTravado(ticket.auto_atualizado_em, agora())) return;
-      const motivo = `${MOTIVOS.FALHA}: envio interrompido — confirme no destino antes de reenviar`;
+      const motivo = `${MOTIVOS.FALHA}: envio interrompido — ${CONFIRME_NO_DESTINO}`;
       if (await db.reservar(ticket.id, 'enviando', 'falha', { auto_motivo: motivo })) {
         await evento('envio_automatico_falhou', ticket, await db.perfil(ticket.client_id), { motivo });
       }

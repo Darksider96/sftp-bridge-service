@@ -54,7 +54,14 @@ function montar({
   chavesComTicket = [],
   conflitoAoCriarTicket = false, // outra varredura criou o ticket do mesmo mailing antes
 } = {}) {
-  const estado = { tickets: tickets.map((t) => ({ ...t })), chamadas: [], eventos: [], jobsCriados: [], ticketsCriados: [] };
+  const estado = {
+    tickets: tickets.map((t) => ({ ...t })),
+    chamadas: [],
+    eventos: [],
+    jobsCriados: [],
+    ticketsCriados: [],
+    esperas: [],
+  };
   const achar = (id) => estado.tickets.find((t) => t.id === id);
 
   const db = {
@@ -94,7 +101,10 @@ function montar({
 
   const chamarFuncao = async (nome, corpo) => {
     estado.chamadas.push({ nome, corpo });
-    const resposta = respostas[nome];
+    // Lista = uma resposta por chamada (a última vale para as seguintes).
+    const previstas = respostas[nome];
+    const feitas = estado.chamadas.filter((c) => c.nome === nome).length;
+    const resposta = Array.isArray(previstas) ? previstas[Math.min(feitas, previstas.length) - 1] : previstas;
     if (resposta instanceof Error) throw resposta;
     return resposta || { status: 200, data: { success: true, status: 200, message: 'OK' } };
   };
@@ -106,6 +116,9 @@ function montar({
       estado.eventos.push(payload);
     },
     agora: () => AGORA,
+    esperar: async (ms) => {
+      estado.esperas.push(ms);
+    },
   });
 
   return { fluxo, estado, ticket: (id = 't1') => achar(id) };
@@ -223,28 +236,85 @@ test('AUTO-21: arquivo sem registros → nada é enviado, ticket pausado com o m
   assert.equal(estado.eventos[0].motivo, 'Envio automático pausado: arquivo sem registros');
 });
 
-test('AUTO-22: destino respondeu erro → falha com a mensagem, evento de falha e nenhuma nova tentativa', async () => {
+const erroDoDestino = { status: 200, data: { success: false, status: 403, message: 'Acesso negado' } };
+const aceito = { status: 200, data: { success: true, status: 200, message: 'OK' } };
+
+test('AUTO-22: destino respondeu erro nas três tentativas → falha com a mensagem e um único evento de falha', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [ticketBase()],
+    arquivos: { 'c1/processed/base.csv': CSV_2_REGISTROS },
+    respostas: { 'higienizadora-upload-synq': erroDoDestino },
+  });
+
+  await fluxo.enviarAoDestino(ticketBase(), perfilBase(), true);
+
+  assert.equal(uploads(estado).length, 3);
+  assert.deepEqual(estado.esperas, [30000, 30000]);
+  assert.equal(ticket().auto_status, 'falha');
+  assert.equal(ticket().auto_motivo, 'Falha no envio automático: Acesso negado (3 tentativas)');
+  assert.equal(ticket().status_id, undefined);
+  assert.equal(estado.eventos.length, 1);
+  assert.equal(estado.eventos[0].event, 'envio_automatico_falhou');
+  assert.equal(estado.eventos[0].motivo, 'Falha no envio automático: Acesso negado (3 tentativas)');
+  assert.equal(estado.eventos[0].integracao, 'synq');
+});
+
+test('AUTO-22: destino respondeu erro e aceitou na tentativa seguinte → enviado, sem evento de falha', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [ticketBase()],
+    arquivos: { 'c1/processed/base.csv': CSV_2_REGISTROS },
+    respostas: { 'higienizadora-upload-synq': [erroDoDestino, aceito] },
+  });
+
+  await fluxo.enviarAoDestino(ticketBase(), perfilBase(), true);
+
+  assert.equal(uploads(estado).length, 2);
+  assert.deepEqual(estado.esperas, [30000]);
+  assert.equal(ticket().auto_status, 'enviado');
+  assert.equal(ticket().auto_motivo, null);
+  assert.deepEqual(estado.eventos.map((e) => e.event), ['envio_automatico_concluido']);
+});
+
+test('AUTO-22: destino aceitou na terceira tentativa → enviado', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [ticketBase()],
+    arquivos: { 'c1/processed/base.csv': CSV_2_REGISTROS },
+    respostas: { 'higienizadora-upload-synq': [erroDoDestino, erroDoDestino, aceito] },
+  });
+
+  await fluxo.enviarAoDestino(ticketBase(), perfilBase(), true);
+
+  assert.equal(uploads(estado).length, 3);
+  assert.equal(ticket().auto_status, 'enviado');
+  assert.deepEqual(estado.eventos.map((e) => e.event), ['envio_automatico_concluido']);
+});
+
+test('AUTO-22/AUTO-24: destino não respondeu a tempo → falha na hora, sem nova tentativa (pode ter importado)', async () => {
   const { fluxo, estado, ticket } = montar({
     tickets: [ticketBase()],
     arquivos: { 'c1/processed/base.csv': CSV_2_REGISTROS },
     respostas: {
-      'higienizadora-upload-synq': { status: 200, data: { success: false, status: 403, message: 'Acesso negado' } },
+      'higienizadora-upload-synq': {
+        status: 200,
+        data: { success: false, status: 408, message: 'Timeout: A API da Synq não respondeu em 140 segundos' },
+      },
     },
   });
 
   await fluxo.enviarAoDestino(ticketBase(), perfilBase(), true);
 
   assert.equal(uploads(estado).length, 1);
+  assert.deepEqual(estado.esperas, []);
   assert.equal(ticket().auto_status, 'falha');
-  assert.equal(ticket().auto_motivo, 'Falha no envio automático: Acesso negado');
-  assert.equal(ticket().status_id, undefined);
+  assert.equal(
+    ticket().auto_motivo,
+    'Falha no envio automático: Timeout: A API da Synq não respondeu em 140 segundos — confirme no destino antes de reenviar'
+  );
   assert.equal(estado.eventos.length, 1);
   assert.equal(estado.eventos[0].event, 'envio_automatico_falhou');
-  assert.equal(estado.eventos[0].motivo, 'Falha no envio automático: Acesso negado');
-  assert.equal(estado.eventos[0].integracao, 'synq');
 });
 
-test('AUTO-22: falha de conexão com o destino → falha, sem nova tentativa', async () => {
+test('AUTO-22/AUTO-24: chamada de envio caiu sem resposta → falha na hora, sem nova tentativa', async () => {
   const { fluxo, estado, ticket } = montar({
     tickets: [ticketBase()],
     arquivos: { 'c1/processed/base.csv': CSV_2_REGISTROS },
@@ -254,9 +324,26 @@ test('AUTO-22: falha de conexão com o destino → falha, sem nova tentativa', a
   await fluxo.enviarAoDestino(ticketBase(), perfilBase(), true);
 
   assert.equal(uploads(estado).length, 1);
+  assert.deepEqual(estado.esperas, []);
   assert.equal(ticket().auto_status, 'falha');
-  assert.equal(ticket().auto_motivo, 'Falha no envio automático: fetch failed');
+  assert.equal(ticket().auto_motivo, 'Falha no envio automático: fetch failed — confirme no destino antes de reenviar');
   assert.equal(estado.eventos[0].event, 'envio_automatico_falhou');
+});
+
+test('AUTO-22: falha ao preparar o arquivo original não é repetida (o destino nem foi chamado)', async () => {
+  const { fluxo, estado, ticket } = montar({
+    tickets: [ticketBase()],
+    respostas: {
+      'higienizadora-ensure-mailing-header': { status: 500, data: { success: false, error: 'Arquivo ilegível' } },
+    },
+  });
+
+  await fluxo.enviarAoDestino(ticketBase(), perfilBase(), false);
+
+  assert.equal(estado.chamadas.length, 1);
+  assert.equal(uploads(estado).length, 0);
+  assert.deepEqual(estado.esperas, []);
+  assert.equal(ticket().auto_motivo, 'Falha no envio automático: Arquivo ilegível');
 });
 
 test('AUTO-14: arquivo original passa pela normalização de cabeçalho antes de ir para o destino', async () => {

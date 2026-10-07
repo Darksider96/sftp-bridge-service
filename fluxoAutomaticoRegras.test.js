@@ -237,3 +237,28 @@ test('AUTO-25: ticket ainda não enviado segue o fluxo normal no reprocessamento
 test('AUTO-13: ticket manual não é afetado pelo reprocessamento', () => {
   assert.equal(aoReprocessar({ fluxo_automatico: false, auto_status: null, auto_motivo: null }), null);
 });
+
+const { podeRepetirEnvio, MAX_TENTATIVAS_ENVIO, INTERVALO_TENTATIVAS_MS } = require('./fluxoAutomaticoRegras');
+const respostaDoEnvio = (status) => ({ status: 200, data: { success: false, status, message: 'x' } });
+
+test('AUTO-22: erro respondido pelo destino (ou antes de chegar nele) pode ser tentado de novo', () => {
+  for (const status of [400, 401, 403, 404, 422, 500, 503]) {
+    assert.equal(podeRepetirEnvio(respostaDoEnvio(status)), true, `status ${status}`);
+  }
+});
+
+test('AUTO-22/AUTO-24: sem resposta do destino (tempo esgotado ou conexão caiu no meio) não é tentado de novo', () => {
+  for (const status of [408, 502, 504]) {
+    assert.equal(podeRepetirEnvio(respostaDoEnvio(status)), false, `status ${status}`);
+  }
+});
+
+test('AUTO-22/AUTO-24: resposta sem corpo (a função de envio caiu) não é tentada de novo', () => {
+  assert.equal(podeRepetirEnvio({ status: 504, data: null }), false);
+  assert.equal(podeRepetirEnvio({ status: 500, data: undefined }), false);
+});
+
+test('AUTO-22: são três tentativas de envio ao destino, com 30 segundos entre elas', () => {
+  assert.equal(MAX_TENTATIVAS_ENVIO, 3);
+  assert.equal(INTERVALO_TENTATIVAS_MS, 30000);
+});
