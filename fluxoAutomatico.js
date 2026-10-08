@@ -6,6 +6,7 @@ const {
   MOTIVOS,
   resolverDestino,
   ehRepetido,
+  repetidoDoCrm,
   JANELA_REPETIDO_MS,
   contarRegistros,
   nomesParaEnvio,
@@ -135,6 +136,17 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     return ehRepetido(atual, iguais);
   }
 
+  async function mailingDoCrmRepetido(mailing) {
+    if (mailing.records_count == null) return false;
+    const iguais = await db.ticketsMesmoMailing({
+      clientId: mailing.client_id,
+      mailingName: nomeTicketDoMailing(mailing.file_name),
+      quantidade: mailing.records_count,
+      desde: new Date(new Date(mailing.received_at).getTime() - JANELA_REPETIDO_MS).toISOString(),
+    });
+    return repetidoDoCrm(mailing, iguais);
+  }
+
   async function iniciar() {
     await paraCada(await db.ticketsPorStatus('pendente'), 'iniciar', async (ticket) => {
       // Sem evento: repetição é esperada (cliente clicou de novo), não um
@@ -206,8 +218,13 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
     const { criar, planilhas } = mailingsParaTicket(mailings, perfis, await db.chavesComTicket(desde));
     const perfilPorId = new Map(perfis.map((p) => [p.id, p]));
 
+    // Do mais antigo para o mais novo: entre repetidos, o primeiro recebido
+    // é o que vira ticket.
+    criar.sort((a, b) => new Date(a.received_at) - new Date(b.received_at));
+
     for (const mailing of criar) {
       try {
+        if (await mailingDoCrmRepetido(mailing)) continue;
         // O banco garante um ticket por mailing; conflito = outra varredura criou antes.
         await db.criarTicketDoMailing({
           client_id: mailing.client_id,

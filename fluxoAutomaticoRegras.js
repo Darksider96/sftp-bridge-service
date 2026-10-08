@@ -84,6 +84,18 @@ function envioTravado(autoAtualizadoEm, agora = new Date()) {
   return agora.getTime() - new Date(autoAtualizadoEm).getTime() > LIMITE_ENVIANDO_MS;
 }
 
+/**
+ * Mailing do CRM que repete um ticket já existente nem vira ticket (decisão
+ * de 2026-10-08). O ticket igual pode ter sido criado depois de o mailing
+ * chegar (varredura atrasada), por isso a janela vale para os dois lados.
+ * @param {{received_at: string}} mailing
+ * @param {{created_at: string}[]} iguais tickets do mesmo cliente com o mesmo nome e a mesma quantidade
+ */
+function repetidoDoCrm(mailing, iguais) {
+  const recebidoEm = new Date(mailing.received_at).getTime();
+  return iguais.some((t) => Math.abs(new Date(t.created_at).getTime() - recebidoEm) <= JANELA_REPETIDO_MS);
+}
+
 // Mesmas regras de src/pages/admin/AdminTickets.tsx (normalizeForIntegration,
 // stripFileExtension) — o envio automático tem que nomear igual ao manual.
 function normalizarParaIntegracao(nome) {
@@ -163,6 +175,7 @@ module.exports = {
   MOTIVOS,
   resolverDestino,
   ehRepetido,
+  repetidoDoCrm,
   JANELA_REPETIDO_MS,
   deveSegurarPorAprovacao,
   contarRegistros,

@@ -276,3 +276,18 @@ test('AUTO-29: criados no mesmo instante — só um segue (o de menor id)', () =
   assert.equal(ehRepetido(ATUAL, [gemeo]), true);
   assert.equal(ehRepetido(gemeo, [ATUAL]), false);
 });
+
+const { repetidoDoCrm } = require('./fluxoAutomaticoRegras');
+const RECEBIDO = { received_at: '2026-10-07T15:00:00.000Z' };
+
+test('AUTO-29: mailing do CRM é repetido quando há ticket igual criado até 24 horas antes ou depois dele', () => {
+  assert.equal(repetidoDoCrm(RECEBIDO, [registro('t1', '2026-10-06T15:00:00.000Z')]), true);
+  assert.equal(repetidoDoCrm(RECEBIDO, [registro('t1', '2026-10-07T15:02:00.000Z')]), true);
+  assert.equal(repetidoDoCrm(RECEBIDO, [registro('t1', '2026-10-08T15:00:00.000Z')]), true);
+});
+
+test('AUTO-29: ticket igual a mais de 24 horas de distância não torna o mailing do CRM repetido', () => {
+  assert.equal(repetidoDoCrm(RECEBIDO, [registro('t1', '2026-10-06T14:59:59.000Z')]), false);
+  assert.equal(repetidoDoCrm(RECEBIDO, [registro('t1', '2026-10-08T15:00:01.000Z')]), false);
+  assert.equal(repetidoDoCrm(RECEBIDO, []), false);
+});

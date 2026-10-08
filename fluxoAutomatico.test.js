@@ -109,6 +109,9 @@ function montar({
     criarTicketDoMailing: async (dados) => {
       if (conflitoAoCriarTicket) return false;
       estado.ticketsCriados.push(dados);
+      // Sem auto_status (no banco é o trigger que define): o ticket novo existe
+      // para a regra do repetido, mas não avança nesta mesma varredura.
+      estado.tickets.push({ ...dados, id: `novo-${estado.ticketsCriados.length}`, created_at: AGORA.toISOString() });
       return true;
     },
   };
@@ -777,4 +780,69 @@ test('AUTO-29: cliente sem higienização — o repetido também não vai para o
   assert.equal(uploads(estado)[0].corpo.ticketId, 't1');
   assert.equal(ticket('t2').auto_status, 'pausado');
   assert.equal(ticket('t2').auto_motivo, MOTIVO_REPETIDO);
+});
+
+// ---------------------------------------------------------------------------
+// avancar: mailing repetido vindo do CRM nem vira ticket
+// ---------------------------------------------------------------------------
+
+test('AUTO-29: o CRM mandou o mesmo mailing duas vezes → só o primeiro recebido vira ticket, sem aviso', async () => {
+  const segundo = mailingCrm({ id: 'm2', file_url: 'c1/finaz/2-mailing_finaz.csv', received_at: '2026-10-06T11:05:00.000Z' });
+  const { fluxo, estado } = montar({ mailings: [segundo, mailingCrm()] });
+
+  await fluxo.avancar();
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados.map((t) => t.origem_mailing_id), ['m1']);
+  assert.equal(estado.eventos.length, 0);
+});
+
+test('AUTO-29: mailing do CRM igual a um ticket que o cliente já criou pelo site não vira ticket', async () => {
+  const doSite = ticketBase({
+    id: 't-site',
+    auto_status: 'enviado',
+    mailing_name: 'mailing_finaz',
+    quantidade_registros: 2,
+    created_at: '2026-10-06T10:00:00.000Z',
+  });
+  const { fluxo, estado } = montar({ tickets: [doSite], mailings: [mailingCrm()] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados, []);
+  assert.equal(estado.eventos.length, 0);
+});
+
+test('AUTO-29: mailing do CRM igual a um ticket de mais de 24 horas atrás vira ticket normalmente', async () => {
+  const antigo = ticketBase({
+    id: 't-antigo',
+    auto_status: 'enviado',
+    mailing_name: 'mailing_finaz',
+    quantidade_registros: 2,
+    created_at: '2026-10-05T10:59:00.000Z',
+  });
+  const { fluxo, estado } = montar({ tickets: [antigo], mailings: [mailingCrm()] });
+
+  await fluxo.avancar();
+
+  assert.equal(estado.ticketsCriados.length, 1);
+});
+
+test('AUTO-29: mailings do CRM com o mesmo nome e quantidades diferentes viram um ticket cada', async () => {
+  const outro = mailingCrm({ id: 'm2', received_at: '2026-10-06T11:05:00.000Z', records_count: 3 });
+  const { fluxo, estado } = montar({ mailings: [mailingCrm(), outro] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados.map((t) => t.origem_mailing_id), ['m1', 'm2']);
+});
+
+test('AUTO-29: mailing do CRM sem quantidade de registros não tem como ser comparado e vira ticket', async () => {
+  const semQuantidade = (id, minuto) =>
+    mailingCrm({ id, received_at: `2026-10-06T11:${minuto}:00.000Z`, records_count: null });
+  const { fluxo, estado } = montar({ mailings: [semQuantidade('m1', '00'), semQuantidade('m2', '05')] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados.map((t) => t.origem_mailing_id), ['m1', 'm2']);
 });

@@ -125,16 +125,15 @@ const db = {
   },
 
   async ticketsMesmoMailing({ clientId, mailingName, quantidade, desde }) {
-    return exigir(
-      await supabaseAdmin
-        .from('tickets')
-        .select('id, created_at')
-        .eq('client_id', clientId)
-        .eq('mailing_name', mailingName)
-        .eq('quantidade_registros', quantidade)
-        .gte('created_at', desde),
-      'buscar tickets do mesmo mailing'
-    );
+    const resposta = await supabaseAdmin
+      .from('tickets')
+      .select('id, created_at')
+      .eq('client_id', clientId)
+      .eq('mailing_name', mailingName)
+      .eq('quantidade_registros', quantidade)
+      .gte('created_at', desde);
+    if (resposta.error && COLUNA_AUSENTE.includes(resposta.error.code)) return [];
+    return exigir(resposta, 'buscar tickets do mesmo mailing');
   },
 
   async perfisAutomaticos() {
