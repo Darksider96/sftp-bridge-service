@@ -143,6 +143,22 @@ const db = {
     );
   },
 
+  // Só carimba quem continua ligado e sem data; devolve a data gravada, ou
+  // null se não havia mais o que corrigir.
+  async carimbarInicio(clientId) {
+    const linhas = exigir(
+      await supabaseAdmin
+        .from('profiles')
+        .update({ fluxo_automatico_desde: new Date().toISOString() })
+        .eq('id', clientId)
+        .eq('fluxo_automatico', true)
+        .is('fluxo_automatico_desde', null)
+        .select('fluxo_automatico_desde'),
+      'carimbar início do fluxo automático'
+    );
+    return linhas[0]?.fluxo_automatico_desde ?? null;
+  },
+
   async mailingsDesde(desde, clientIds) {
     const todos = [];
     for (const [tipo, tabela] of Object.entries(TABELAS_CRM)) {

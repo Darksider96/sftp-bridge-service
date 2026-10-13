@@ -12,6 +12,8 @@ const MOTIVOS = {
   RETORNO_MAIOR: 'Retorno maior chegou após o envio — revisar',
   PLANILHA: 'Mailing do CRM em planilha: crie o ticket manualmente',
   REPETIDO: 'Envio automático pausado: mailing repetido (mesmo nome e mesma quantidade de contatos)',
+  SEM_INICIO:
+    'Fluxo automático estava ligado sem data de início — corrigido agora. Mailings do CRM recebidos antes disso não foram enviados sozinhos: confira e envie manualmente',
 };
 
 // Só a Synq: a Dazsoft saiu do automático por definição do Henrique

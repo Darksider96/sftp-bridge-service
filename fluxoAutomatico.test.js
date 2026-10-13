@@ -53,6 +53,7 @@ function montar({
   mailings = [],
   chavesComTicket = [],
   conflitoAoCriarTicket = false, // outra varredura criou o ticket do mesmo mailing antes
+  carimboNegado = false, // outro processo carimbou o início do cliente antes
 } = {}) {
   const estado = {
     tickets: tickets.map((t) => ({ ...t })),
@@ -61,6 +62,7 @@ function montar({
     jobsCriados: [],
     ticketsCriados: [],
     esperas: [],
+    iniciosCarimbados: [],
   };
   const achar = (id) => estado.tickets.find((t) => t.id === id);
 
@@ -90,6 +92,13 @@ function montar({
     },
     ultimoJob: async (ticketId) => jobs[ticketId] || null,
     perfisAutomaticos: async () => perfis.filter((p) => p.fluxo_automatico),
+    carimbarInicio: async (clientId) => {
+      estado.iniciosCarimbados.push(clientId);
+      if (carimboNegado) return null;
+      const perfil = perfis.find((p) => p.id === clientId);
+      perfil.fluxo_automatico_desde = AGORA.toISOString();
+      return perfil.fluxo_automatico_desde;
+    },
     mailingsDesde: async () => mailings,
     chavesComTicket: async () => new Set(chavesComTicket),
     registroDoTicket: async (id) => {
@@ -845,4 +854,70 @@ test('AUTO-29: mailing do CRM sem quantidade de registros não tem como ser comp
   await fluxo.avancar();
 
   assert.deepEqual(estado.ticketsCriados.map((t) => t.origem_mailing_id), ['m1', 'm2']);
+});
+
+// ---------------------------------------------------------------------------
+// avancar: cliente automático sem data de início (incidente de 13/10)
+// ---------------------------------------------------------------------------
+
+const MOTIVO_SEM_INICIO =
+  'Fluxo automático estava ligado sem data de início — corrigido agora. Mailings do CRM recebidos antes disso não foram enviados sozinhos: confira e envie manualmente';
+const semInicio = () => perfilBase({ fluxo_automatico_desde: null });
+
+test('AUTO-31: cliente automático sem data de início é corrigido na varredura e gera aviso, em vez de ficar parado em silêncio', async () => {
+  const { fluxo, estado } = montar({ perfis: [semInicio()], mailings: [mailingCrm()] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.iniciosCarimbados, ['c1']);
+  assert.deepEqual(estado.eventos, [
+    {
+      event: 'envio_automatico_pausado',
+      ticketId: null,
+      clientId: 'c1',
+      clientName: 'Cliente Um',
+      mailingName: null,
+      integracao: null,
+      registros: null,
+      motivo: MOTIVO_SEM_INICIO,
+    },
+  ]);
+});
+
+test('AUTO-31: mailing recebido antes da correção não é disparado sozinho', async () => {
+  const { fluxo, estado } = montar({ perfis: [semInicio()], mailings: [mailingCrm()] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.ticketsCriados, []);
+});
+
+test('AUTO-31: depois de corrigido, o mailing seguinte do CRM vira ticket e o aviso não se repete', async () => {
+  const depois = mailingCrm({ id: 'm2', received_at: '2026-10-06T12:30:00.000Z' });
+  const { fluxo, estado } = montar({ perfis: [semInicio()], mailings: [mailingCrm(), depois] });
+
+  await fluxo.avancar();
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.iniciosCarimbados, ['c1']);
+  assert.deepEqual(estado.ticketsCriados.map((t) => t.origem_mailing_id), ['m2']);
+  assert.equal(estado.eventos.length, 1);
+});
+
+test('AUTO-31: se outro processo corrigiu antes, não avisa em dobro', async () => {
+  const { fluxo, estado } = montar({ perfis: [semInicio()], mailings: [mailingCrm()], carimboNegado: true });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.iniciosCarimbados, ['c1']);
+  assert.equal(estado.eventos.length, 0);
+  assert.deepEqual(estado.ticketsCriados, []);
+});
+
+test('AUTO-31: cliente automático com data de início não é tocado', async () => {
+  const { fluxo, estado } = montar({ mailings: [mailingCrm()] });
+
+  await fluxo.avancar();
+
+  assert.deepEqual(estado.iniciosCarimbados, []);
 });

@@ -209,9 +209,33 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
   // sairia de minuto em minuto. Vale enquanto o processo estiver de pé.
   const planilhasAvisadas = new Set();
 
+  // Sem a data de início o cliente ficaria ligado na tela e parado na
+  // prática, sem ninguém saber (caso HAJA CRED, 2026-10-13). O banco não
+  // deveria deixar isso existir; se existir, corrige e avisa.
+  async function corrigirSemInicio(perfis) {
+    for (const perfil of perfis) {
+      if (perfil.fluxo_automatico_desde) continue;
+      const carimbado = await db.carimbarInicio(perfil.id);
+      if (!carimbado) continue; // outro processo corrigiu; vale a partir da próxima varredura
+      perfil.fluxo_automatico_desde = carimbado;
+      console.error(`fluxo-automatico: cliente ${perfil.id} estava ligado sem data de início — corrigido`);
+      await notificar({
+        event: 'envio_automatico_pausado',
+        ticketId: null,
+        clientId: perfil.id,
+        clientName: perfil.name ?? null,
+        mailingName: null,
+        integracao: null,
+        registros: null,
+        motivo: MOTIVOS.SEM_INICIO,
+      });
+    }
+  }
+
   async function criarTicketsDoCrm() {
     const perfis = await db.perfisAutomaticos();
     if (!perfis.length) return;
+    await corrigirSemInicio(perfis);
 
     const desde = new Date(agora().getTime() - JANELA_CRM_MS).toISOString();
     const mailings = await db.mailingsDesde(desde, perfis.map((p) => p.id));

@@ -28,6 +28,10 @@ test('MOTIVOS: textos exatos definidos na spec', () => {
   assert.equal(MOTIVOS.FALHA, 'Falha no envio automático');
   assert.equal(MOTIVOS.RETORNO_MAIOR, 'Retorno maior chegou após o envio — revisar');
   assert.equal(MOTIVOS.PLANILHA, 'Mailing do CRM em planilha: crie o ticket manualmente');
+  assert.equal(
+    MOTIVOS.SEM_INICIO,
+    'Fluxo automático estava ligado sem data de início — corrigido agora. Mailings do CRM recebidos antes disso não foram enviados sozinhos: confira e envie manualmente'
+  );
   assert.equal(MOTIVOS.REPETIDO, 'Envio automático pausado: mailing repetido (mesmo nome e mesma quantidade de contatos)');
 });
 
