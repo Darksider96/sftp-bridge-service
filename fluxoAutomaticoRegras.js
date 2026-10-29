@@ -21,6 +21,16 @@ const MOTIVOS = {
 const TIPO_DESTINO = 'synq';
 
 /**
+ * Agressividade do ticket criado a partir de um mailing do CRM: a padrão do
+ * perfil do cliente (Henrique, 2026-10-29); sem ela, moderada. Cliente sem
+ * higienização não tem agressividade.
+ */
+function agressividadeDoCrm(perfil) {
+  if (perfil.optante_higienizacao === false) return null;
+  return perfil.agressividade_padrao === 'agressiva' ? 'agressiva' : 'moderada';
+}
+
+/**
  * Para onde vai o mailing de um cliente automático.
  * @param {{id: string, auto_integracao_id: string|null}} perfil
  * @param {object|null} integracao linha de client_integrations apontada pelo perfil
@@ -176,6 +186,7 @@ module.exports = {
   aoReprocessar,
   MOTIVOS,
   resolverDestino,
+  agressividadeDoCrm,
   ehRepetido,
   repetidoDoCrm,
   JANELA_REPETIDO_MS,

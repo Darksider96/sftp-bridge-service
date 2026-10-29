@@ -921,3 +921,15 @@ test('AUTO-31: cliente automático com data de início não é tocado', async ()
 
   assert.deepEqual(estado.iniciosCarimbados, []);
 });
+
+test('AUTO-32: ticket do CRM de cliente com agressividade padrão agressiva é criado na agressiva', async () => {
+  const { fluxo, estado } = montar({
+    mailings: [mailingCrm()],
+    perfis: [perfilBase({ agressividade_padrao: 'agressiva' })],
+  });
+
+  await fluxo.avancar();
+
+  assert.equal(estado.ticketsCriados.length, 1);
+  assert.equal(estado.ticketsCriados[0].aggressiveness, 'agressiva');
+});

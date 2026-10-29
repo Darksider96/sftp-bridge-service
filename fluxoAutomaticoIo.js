@@ -12,8 +12,9 @@ const STATUS_FINAL = 'Importado/higienizado, aguardando ativação';
 const TABELAS_CRM = { finaz: 'finaz_mailings', vanguard: 'vanguard_mailings', promosys: 'promosys_mailings' };
 const COLUNAS_TICKET =
   'id, client_id, mailing_name, original_file_url, original_file_name, processed_file_url, processed_file_name, auto_status, auto_atualizado_em';
-const COLUNAS_PERFIL =
-  'id, name, optante_higienizacao, fluxo_automatico, fluxo_automatico_desde, auto_integracao_id';
+// '*' de propósito: uma coluna nova do perfil (ex: agressividade_padrao)
+// publicada antes do SQL não pode derrubar o fluxo automático inteiro.
+const COLUNAS_PERFIL = '*';
 
 // 42703 (Postgres) / PGRST204 (PostgREST): coluna inexistente.
 const COLUNA_AUSENTE = ['42703', 'PGRST204'];

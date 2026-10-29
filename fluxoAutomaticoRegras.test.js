@@ -295,3 +295,19 @@ test('AUTO-29: ticket igual a mais de 24 horas de distância não torna o mailin
   assert.equal(repetidoDoCrm(RECEBIDO, [registro('t1', '2026-10-08T15:00:01.000Z')]), false);
   assert.equal(repetidoDoCrm(RECEBIDO, []), false);
 });
+
+const { agressividadeDoCrm } = require('./fluxoAutomaticoRegras');
+
+test('AUTO-32: ticket do CRM segue a agressividade padrão do perfil do cliente', () => {
+  assert.equal(agressividadeDoCrm({ optante_higienizacao: true, agressividade_padrao: 'agressiva' }), 'agressiva');
+  assert.equal(agressividadeDoCrm({ optante_higienizacao: true, agressividade_padrao: 'moderada' }), 'moderada');
+});
+
+test('AUTO-32: perfil sem agressividade padrão (ou coluna ainda inexistente) vai na moderada', () => {
+  assert.equal(agressividadeDoCrm({ optante_higienizacao: true }), 'moderada');
+  assert.equal(agressividadeDoCrm({ optante_higienizacao: true, agressividade_padrao: null }), 'moderada');
+});
+
+test('AUTO-32: cliente sem higienização não tem agressividade, qualquer que seja o padrão', () => {
+  assert.equal(agressividadeDoCrm({ optante_higienizacao: false, agressividade_padrao: 'agressiva' }), null);
+});

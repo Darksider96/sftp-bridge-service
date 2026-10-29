@@ -5,6 +5,7 @@
 const {
   MOTIVOS,
   resolverDestino,
+  agressividadeDoCrm,
   ehRepetido,
   repetidoDoCrm,
   JANELA_REPETIDO_MS,
@@ -254,7 +255,7 @@ function criarFluxoAutomatico({ db, chamarFuncao, notificar, agora = () => new D
           client_id: mailing.client_id,
           mailing_name: nomeTicketDoMailing(mailing.file_name),
           campaign_name: '',
-          aggressiveness: perfilPorId.get(mailing.client_id).optante_higienizacao === false ? null : 'moderada',
+          aggressiveness: agressividadeDoCrm(perfilPorId.get(mailing.client_id)),
           original_file_url: mailing.file_url,
           original_file_name: mailing.file_name,
           origem_mailing_tipo: mailing.tipo,
