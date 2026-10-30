@@ -103,7 +103,7 @@ function applyFinazRule(rows) {
 function applyPhoneOverflowRule(rows, action) {
   if (!rows.length) return rows;
   const headers = Object.keys(rows[0]);
-  const pairs = detectPhonePairs(headers, '');
+  const pairs = detectPhonePairs(headers, '', rows);
   const overflowCols = new Set();
   pairs.slice(1).forEach((p) => {
     if (!pairLooksLikePhone(rows, p)) return;
@@ -136,7 +136,7 @@ function applyPhoneOverflowRule(rows, action) {
 function mergePhoneColumns(rows) {
   if (!rows.length) return rows;
   const headers = Object.keys(rows[0]);
-  const pair = detectPhonePairs(headers, '')[0];
+  const pair = detectPhonePairs(headers, '', rows)[0];
   if (!pair) return rows;
 
   return rows.map((row) => {

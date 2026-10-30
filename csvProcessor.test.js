@@ -111,3 +111,27 @@ test('arquivo original sem cabeçalho (layout "finaz"): PROCV ainda casa os tele
   assert.equal(result.length, 1);
   assert.equal(result[0].ID, '30000000001');
 });
+
+test('retorno: cabeçalho sem nome de telefone conhecido casa com o que foi enviado', () => {
+  const orig = parseMailingCsv('CPF;NOME;NUMERO\n12345678901;Aprovado;11987654321\n12345678902;Reprovado;21987654322\n');
+  const ret = returned([
+    ['11', '987654321', 3],
+    ['21', '987654322', 1],
+  ]);
+
+  const result = processCentrifugeReturn(orig, ret, 'AGRESSIVA');
+
+  assert.deepEqual(result.map((r) => r.NOME), ['Aprovado']);
+});
+
+test('retorno: telefone na primeira coluna, sem nome conhecido, casa pelo conteúdo', () => {
+  const orig = parseMailingCsv('COLUNA1;COLUNA2\n11987654321;Aprovado\n21987654322;Reprovado\n');
+  const ret = returned([
+    ['11', '987654321', 3],
+    ['21', '987654322', 1],
+  ]);
+
+  const result = processCentrifugeReturn(orig, ret, 'AGRESSIVA');
+
+  assert.deepEqual(result.map((r) => r.COLUNA2), ['Aprovado']);
+});

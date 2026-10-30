@@ -63,7 +63,7 @@ function processCentrifugeReturn(originalData, returnedData, filterLevel = 'AGRE
   // a linha — é o único que de fato foi enviado à higienização (mesma regra
   // aplicada no motor de envio, mailingNormalizer.js/normalizeMailing).
   const origHeaders = Object.keys(originalData[0]);
-  const pairs = detectPhonePairs(origHeaders, '').slice(0, 1);
+  const pairs = detectPhonePairs(origHeaders, '', originalData).slice(0, 1);
 
   // 4. O PROCV: Filtrar a base original
   const finalResult = [];

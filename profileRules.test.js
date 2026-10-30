@@ -95,7 +95,7 @@ function withThreePhones() {
   return [{
     CPF: '1',
     DDD1: '11',
-    Telefone1: '999999999',
+    Telefone1: '987654321',
     DDD2: '21',
     Telefone2: '988888888',
     DDD3: '31',
@@ -110,7 +110,7 @@ test('applyPhoneOverflowRule: exclude remove todas as colunas de telefone alem d
   assert.equal('DDD3' in result[0], false);
   assert.equal('Telefone3' in result[0], false);
   assert.equal(result[0].DDD1, '11');
-  assert.equal(result[0].Telefone1, '999999999');
+  assert.equal(result[0].Telefone1, '987654321');
 });
 
 test('applyPhoneOverflowRule: keep_empty mantem as colunas, so esvazia o valor', () => {
@@ -253,4 +253,19 @@ test('buildFinalFileName: sufixo AGRESSIVA antes da extensao', () => {
 
 test('buildFinalFileName: nome do mailing sem extensao (caso comum) ganha .csv no final', () => {
   assert.equal(buildFinalFileName('teste 4 Johnatan', 'AGRESSIVA'), 'teste 4 Johnatan_HIG_AGRESSIVA.csv');
+});
+
+test('mergePhoneColumns: DDD separado com coluna NUMERO vira uma coluna só', () => {
+  const rows = [{ CPF: '1', DDD: '11', NUMERO: '98765-4321' }];
+  assert.deepEqual(mergePhoneColumns(rows), [{ CPF: '1', NUMERO: '11987654321' }]);
+});
+
+test('applyPhoneOverflowRule: primeira coluna de telefone vazia não apaga a que tem o número', () => {
+  const rows = [{ CPF: '1', TEL1: '', TEL2: '11987654321', TEL3: '21987654322' }];
+  assert.deepEqual(applyPhoneOverflowRule(rows, 'exclude'), [{ CPF: '1', TEL1: '', TEL2: '11987654321' }]);
+});
+
+test('applyPhoneOverflowRule: telefone excedente em WHATSAPP sai como os demais', () => {
+  const rows = [{ CPF: '1', TELEFONE: '11987654321', WHATSAPP: '21987654322' }];
+  assert.deepEqual(applyPhoneOverflowRule(rows, 'exclude'), [{ CPF: '1', TELEFONE: '11987654321' }]);
 });

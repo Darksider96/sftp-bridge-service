@@ -66,7 +66,7 @@ function normalizeHeader(header) {
 // deve passar por essa mesma pergunta antes de ser usada com startsWith:
 // existe uma palavra comum de mailing/financeiro que começa com ela sem
 // ser o que estamos procurando? Se sim, entra neste set.
-const EXACT_MATCH_ONLY_KEYWORDS = new Set(['id']);
+const EXACT_MATCH_ONLY_KEYWORDS = new Set(['id', 'nb', 'rg', 'dt', 'doc', 'conta', 'area', 'área']);
 
 // Compara por TOKEN (prefixo de uma palavra inteira do cabeçalho), não
 // substring solta em qualquer posição — bug real em produção (2026-08-25):
@@ -143,25 +143,40 @@ function detectIdColumn(headers, explicitIdColumn) {
   return headers[0];
 }
 
-/**
- * Identifica os pares (coluna DDD, coluna telefone) do arquivo.
- *
- * Estratégia: colunas de telefone/DDD com o mesmo sufixo numérico são
- * pareadas entre si (ex: "DDD 2" com "Celular 2"). As colunas restantes
- * (sem sufixo, ou sufixo sem par do outro lado) são pareadas por posição,
- * na ordem em que aparecem. Toda coluna de telefone entra na lista, mesmo
- * sem DDD pareado — o DDD pode estar embutido no próprio número.
- */
-function detectPhonePairs(headers, idColumn) {
-  const relevant = headers.filter((h) => h !== idColumn);
-  const combinedCols = new Set(relevant.filter((h) => headerIsCombinedDddTel(h)));
+// Palavras que indicam telefone no nome da coluna. As fracas só valem quando
+// nenhuma forte tem telefone de verdade: "numero" também é número do endereço
+// e "contato" também é data de contato.
+const PHONE_KEYWORDS = ['tel', 'cel', 'fone', 'phone', 'mobile', 'movel', 'móvel', 'whats', 'wpp', 'zap'];
+const WEAK_PHONE_KEYWORDS = ['numero', 'número', 'num', 'nro', 'nº', 'contato', 'linha'];
+const DDD_KEYWORDS = ['ddd', 'prefixo', 'area', 'área'];
 
-  const dddCols = relevant.filter((h) => !combinedCols.has(h) && headerHasToken(h, 'ddd'));
-  const telCols = relevant.filter((h) => {
-    if (combinedCols.has(h)) return true;
-    if (headerHasToken(h, 'ddd')) return false;
-    return headerHasToken(h, 'tel') || headerHasToken(h, 'cel') || headerHasToken(h, 'fone');
-  });
+// Colunas numéricas que podem se passar por telefone: número de benefício do
+// INSS tem 10 dígitos e costuma cair na faixa de DDD + fixo.
+const NON_PHONE_KEYWORDS = [
+  'cpf', 'cnpj', 'rg', 'nb', 'beneficio', 'benefício', 'matricula', 'matrícula', 'contrato', 'codigo', 'código',
+  'id', 'cep', 'conta', 'agencia', 'agência', 'banco', 'parcela', 'valor', 'saldo', 'salario', 'salário', 'margem',
+  'data', 'dt', 'nascimento', 'idade', 'especie', 'espécie', 'proposta', 'protocolo', 'documento', 'doc',
+];
+
+// Só pelo conteúdo: maioria dos valores preenchidos precisa ser telefone válido
+// (mesmo critério de looksLikePhoneColumn), e a coluna de DDD vizinha precisa
+// ser quase toda de DDDs reais.
+const MIN_PHONE_RATIO = 0.5;
+const MIN_DDD_RATIO = 0.8;
+// Abaixo disso a coluna é tratada como "não é celular": número de benefício
+// passa por telefone fixo, mas quase nunca por celular.
+const MIN_MOBILE_RATIO = 0.2;
+
+function headerHasAny(header, keywords) {
+  return keywords.some((keyword) => headerHasToken(header, keyword));
+}
+
+function pairPhonesByName(relevant, isPhoneHeader) {
+  const combinedCols = new Set(relevant.filter((h) => headerIsCombinedDddTel(h)));
+  const isDddHeader = (h) => !combinedCols.has(h) && headerHasAny(h, DDD_KEYWORDS);
+
+  const dddCols = relevant.filter(isDddHeader);
+  const telCols = relevant.filter((h) => combinedCols.has(h) || (!isDddHeader(h) && isPhoneHeader(h)));
 
   const dddBySuffix = new Map();
   const dddWithoutSuffix = [];
@@ -191,6 +206,87 @@ function detectPhonePairs(headers, idColumn) {
   }
 
   return pairs;
+}
+
+function pairStats(rows, pair) {
+  let filled = 0;
+  let valid = 0;
+  let mobile = 0;
+  for (const row of rows) {
+    const rawTel = row[pair.tel] ?? '';
+    if (!onlyDigits(rawTel)) continue;
+    filled++;
+    const extracted = extractDddTelefone(pair.ddd ? row[pair.ddd] ?? '' : '', rawTel);
+    if (extracted) {
+      valid++;
+      if (extracted.telefone.length === 9) mobile++;
+    }
+  }
+  return { valid, ratio: filled ? valid / filled : 0, mobileRatio: filled ? mobile / filled : 0 };
+}
+
+function dddColumnRatio(rows, header) {
+  const values = rows.map((row) => onlyDigits(row[header])).filter(Boolean);
+  if (!values.length) return 0;
+  return values.filter((v) => isValidDdd(v)).length / values.length;
+}
+
+// Sem pista no nome: olha os valores. Mesmo arquivo, mesma resposta -- o
+// retorno precisa achar a mesma coluna que o envio usou.
+function detectPhonePairsByContent(headers, rows) {
+  const candidates = [];
+  headers.forEach((tel, index) => {
+    if (headerHasAny(tel, NON_PHONE_KEYWORDS)) return;
+
+    const left = headers[index - 1];
+    const alone = pairStats(rows, { ddd: null, tel });
+    const withDdd =
+      left && dddColumnRatio(rows, left) >= MIN_DDD_RATIO ? pairStats(rows, { ddd: left, tel }) : null;
+
+    if (withDdd && withDdd.ratio > alone.ratio) candidates.push({ ddd: left, tel, ...withDdd });
+    else candidates.push({ ddd: null, tel, ...alone });
+  });
+
+  const phones = candidates.filter((c) => c.ratio >= MIN_PHONE_RATIO);
+  const hasMobile = phones.some((c) => c.mobileRatio >= MIN_MOBILE_RATIO);
+  return phones
+    .filter((c) => !hasMobile || c.mobileRatio >= MIN_MOBILE_RATIO)
+    .map(({ ddd, tel }) => ({ ddd, tel }));
+}
+
+/**
+ * Identifica os pares (coluna DDD, coluna telefone) do arquivo.
+ *
+ * Colunas de telefone/DDD com o mesmo sufixo numérico são pareadas entre si
+ * (ex: "DDD 2" com "Celular 2"); as restantes, por posição, na ordem em que
+ * aparecem. O DDD pode estar embutido no próprio número.
+ *
+ * Com `rows`, o nome da coluna é só uma pista: vale a primeira etapa que
+ * encontrar telefone de verdade nos valores (nome forte, nome fraco, só
+ * conteúdo). Cada cliente nomeia as colunas de um jeito, e nenhuma lista de
+ * nomes cobre todos (caso real: ME7, 2026-10-30). Todo chamador em produção
+ * deve passar `rows`.
+ */
+function detectPhonePairs(headers, idColumn, rows) {
+  const relevant = headers.filter((h) => h !== idColumn);
+  const byName = pairPhonesByName(relevant, (h) => headerHasAny(h, PHONE_KEYWORDS));
+  if (!rows) return byName;
+
+  const hasPhones = (pair) => pairStats(rows, pair).valid > 0;
+
+  const strong = byName.filter(hasPhones);
+  if (strong.length) return strong;
+
+  const weak = pairPhonesByName(
+    relevant,
+    (h) => headerHasAny(h, WEAK_PHONE_KEYWORDS) && !headerHasAny(h, NON_PHONE_KEYWORDS)
+  ).filter(hasPhones);
+  if (weak.length) return weak;
+
+  const byContent = detectPhonePairsByContent(relevant, rows);
+  // Nada parece telefone: mantém a coluna pelo nome, sem ela o erro diria que
+  // a coluna não existe em vez de que os telefones são inválidos.
+  return byContent.length ? byContent : byName;
 }
 
 /** Combina um par bruto (ddd, telefone) em {ddd, telefone} limpos, ou null se inválido. */
@@ -240,7 +336,10 @@ function normalizeMailing(rows, options = {}) {
 
   const headers = Object.keys(rows[0]);
   const idColumn = detectIdColumn(headers, options.idColumn);
-  const pairs = detectPhonePairs(headers, idColumn);
+  // Sem excluir a coluna de id da busca: sem CPF/ID no arquivo, detectIdColumn
+  // cai na primeira coluna, que pode ser justamente a do telefone. O retorno
+  // (csvProcessor.js) também busca assim, e os dois precisam achar a mesma.
+  const pairs = detectPhonePairs(headers, '', rows);
 
   if (!pairs.length) {
     throw new Error('Nenhuma coluna de telefone/DDD encontrada no arquivo');
@@ -293,7 +392,10 @@ function normalizeMailing(rows, options = {}) {
 // num CPF/telefone/nome de pessoa. Usado só para decidir se a primeira linha
 // do arquivo é cabeçalho ou já é dado — não usado para escolher qual coluna é
 // qual (isso é papel de detectIdColumn/detectPhonePairs).
-const HEADER_KEYWORDS = ['ddd', 'tel', 'telefone', 'cel', 'celular', 'fone', 'phone', ...ID_COLUMN_CANDIDATES, 'nome'];
+const HEADER_KEYWORDS = [
+  'ddd', 'tel', 'telefone', 'cel', 'celular', 'fone', 'phone', 'whatsapp', 'numero', 'número', 'contato',
+  ...ID_COLUMN_CANDIDATES, 'nome',
+];
 
 // Compara por TOKEN inteiro (não substring solta) — bug real encontrado em
 // produção (2026-08-18): substring simples fazia "APARECIDA"/"CÂNDIDO"/
@@ -302,13 +404,18 @@ const HEADER_KEYWORDS = ['ddd', 'tel', 'telefone', 'cel', 'celular', 'fone', 'ph
 // a primeira LINHA DE DADO de um arquivo sem cabeçalho (ex: layout "finaz")
 // ser lida como se fosse cabeçalho — a linha inteira sumia do processamento.
 function looksLikeRealHeader(headerFields) {
-  return headerFields.some((h) => {
+  const hasKeyword = headerFields.some((h) => {
     const tokens = normalizeHeader(String(h))
       .split(/[^\p{L}\p{N}]+/u)
       .map((t) => t.replace(/\d+$/, ''))
       .filter(Boolean);
     return tokens.some((t) => HEADER_KEYWORDS.includes(t));
   });
+  if (hasKeyword) return true;
+
+  // Sem palavra conhecida: linha de dado tem algum campo só numérico (id,
+  // telefone); linha só de texto é cabeçalho com nomes que não conhecemos.
+  return !headerFields.some((h) => /^[\d\s().+-]+$/.test(h) && onlyDigits(h).length > 0);
 }
 
 /** Amostra os valores de uma coluna (por posição) e decide se parecem telefone. */

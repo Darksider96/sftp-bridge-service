@@ -355,3 +355,103 @@ test('parseMailingCsv: arquivo com cabeçalho de verdade continua sendo lido com
   const rows = parseMailingCsv(csv);
   assert.deepEqual(rows, [{ CPF: '11111111111', Nome: 'Fulano', Telefone: '11999998888' }]);
 });
+
+// ---------------------------------------------------------------------------
+// Qualquer cabeçalho: a coluna de telefone é achada pelo nome ou pelo conteúdo
+// (caso real: ME7, mailing "26K", 2026-10-30)
+// ---------------------------------------------------------------------------
+
+const lerArquivo = (texto) => normalizeMailing(parseMailingCsv(texto)).rows.map((r) => `${r.ddd}${r.telefone}`);
+const CEL_1 = '11987654321';
+const CEL_2 = '21987654322';
+
+test('cabeçalho: nomes de telefone fora da lista antiga são reconhecidos', () => {
+  for (const coluna of ['NUMERO', 'Número', 'WHATSAPP', 'Whats', 'WPP', 'ZAP', 'CONTATO', 'PHONE', 'MOBILE', 'MOVEL', 'NRO', 'LINHA']) {
+    const arquivo = `CPF;NOME;${coluna}\n12345678901;Ana;${CEL_1}\n12345678902;Bia;${CEL_2}\n`;
+    assert.deepEqual(lerArquivo(arquivo), [CEL_1, CEL_2], coluna);
+  }
+});
+
+test('cabeçalho: telefone na primeira coluna, sem CPF ou ID, não é confundido com identificador', () => {
+  assert.deepEqual(lerArquivo(`TELEFONE;NOME;CIDADE\n${CEL_1};Ana;SP\n${CEL_2};Bia;RJ\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: nome com "cliente" na coluna de telefone não é confundido com identificador', () => {
+  assert.deepEqual(lerArquivo(`NOME;TELEFONE CLIENTE;CIDADE\nAna;${CEL_1};SP\nBia;${CEL_2};RJ\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: arquivo só com a coluna de telefone', () => {
+  assert.deepEqual(lerArquivo(`TELEFONE\n${CEL_1}\n${CEL_2}\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: DDD separado com coluna de número de outro nome', () => {
+  assert.deepEqual(lerArquivo('CPF;NOME;DDD;NUMERO\n12345678901;Ana;11;987654321\n12345678902;Bia;21;987654322\n'), [CEL_1, CEL_2]);
+  assert.deepEqual(lerArquivo('CPF;COD_AREA;LINHA\n12345678901;11;987654321\n12345678902;21;987654322\n'), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: nomes sem nenhuma pista, telefone achado pelo conteúdo', () => {
+  assert.deepEqual(lerArquivo(`COLUNA1;COLUNA2;COLUNA3\nAna;SP;${CEL_1}\nBia;RJ;${CEL_2}\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: sem pista no nome, DDD e telefone em colunas vizinhas são pareados pelo conteúdo', () => {
+  assert.deepEqual(lerArquivo('A;B;C\nAna;11;987654321\nBia;21;987654322\n'), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: coluna de idade antes do telefone não é tratada como DDD', () => {
+  assert.deepEqual(lerArquivo(`NOME;IDADE;CAMPO\nAna;65;${CEL_1}\nBia;71;${CEL_2}\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: número de benefício (parece telefone fixo) não ganha do telefone de verdade', () => {
+  const arquivo = `CPF;NB;NUMERO\n12345678901;1871234567;${CEL_1}\n12345678902;1871234568;${CEL_2}\n`;
+  assert.deepEqual(lerArquivo(arquivo), [CEL_1, CEL_2]);
+  const semPista = `A;B;C\nAna;1871234567;${CEL_1}\nBia;1871234568;${CEL_2}\n`;
+  assert.deepEqual(lerArquivo(semPista), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: "numero" no nome de coluna de benefício não vira telefone', () => {
+  const arquivo = `CPF;NUMERO_BENEFICIO;NUMERO
+12345678901;1871234567;${CEL_1}
+12345678902;1871234568;${CEL_2}
+`;
+  assert.deepEqual(lerArquivo(arquivo), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: número do endereço não é confundido com telefone', () => {
+  const arquivo = `NOME;ENDERECO;NUMERO;BAIRRO;CELULAR\nAna;Rua A;120;Centro;${CEL_1}\nBia;Rua B;45;Vila;${CEL_2}\n`;
+  assert.deepEqual(lerArquivo(arquivo), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: coluna com nome parecido e sem telefone é ignorada', () => {
+  assert.deepEqual(lerArquivo(`CPF;TELEMARKETING;TELEFONE\n12345678901;S;${CEL_1}\n12345678902;N;${CEL_2}\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: primeira coluna de telefone vazia, usa a primeira preenchida', () => {
+  assert.deepEqual(lerArquivo(`CPF;TEL1;TEL2\n12345678901;;${CEL_1}\n12345678902;;${CEL_2}\n`), [CEL_1, CEL_2]);
+});
+
+test('cabeçalho: várias colunas de telefone sem pista no nome, vale a mais à esquerda', () => {
+  const rows = parseMailingCsv(`A;B;C\nAna;${CEL_1};${CEL_2}\nBia;${CEL_2};${CEL_1}\n`);
+  const pairs = detectPhonePairs(Object.keys(rows[0]), '', rows);
+  assert.deepEqual(pairs.map((p) => p.tel), ['B', 'C']);
+});
+
+test('cabeçalho: palavras novas não fazem dado virar cabeçalho, e cabeçalho sem palavra conhecida não vira dado', () => {
+  const semCabecalho = parseMailingCsv(`123;MARIA APARECIDA;${CEL_1}\n124;JOSE;${CEL_2}\n`);
+  assert.equal(semCabecalho.length, 2);
+  const comCabecalho = parseMailingCsv(`PESSOA;NUMERO;CIDADE\nAna;${CEL_1};SP\n`);
+  assert.deepEqual(comCabecalho, [{ PESSOA: 'Ana', NUMERO: CEL_1, CIDADE: 'SP' }]);
+});
+
+test('cabeçalho: arquivo sem nenhum telefone continua dando erro claro', () => {
+  assert.throws(
+    () => normalizeMailing(parseMailingCsv('CPF;NOME;CIDADE\n12345678901;Ana;SP\n12345678902;Bia;RJ\n')),
+    /Nenhuma coluna de telefone\/DDD encontrada/
+  );
+});
+
+test('cabeçalho: CPF nunca é usado como telefone, mesmo parecendo', () => {
+  assert.throws(
+    () => normalizeMailing(parseMailingCsv('CPF;NOME\n11987654321;Ana\n21987654322;Bia\n')),
+    /Nenhuma coluna de telefone\/DDD encontrada/
+  );
+});
